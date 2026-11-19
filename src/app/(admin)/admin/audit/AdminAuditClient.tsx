@@ -1,0 +1,1679 @@
+'use client'
+
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { useSearchParams, useRouter, usePathname } from 'next/navigation'
+import {
+  ShieldCheck,
+  Boxes,
+  Tags,
+  FolderTree,
+  Package,
+  Ticket,
+  MailOpen,
+  ScrollText,
+  ArrowRight,
+  Image as ImageIcon,
+  Truck,
+  Receipt,
+  Wallet,
+  MapPin,
+  Settings,
+  Warehouse,
+  TrendingUp,
+  Wand2,
+  ClipboardList,
+  Tag,
+  Clock,
+  CheckCircle2,
+  XCircle,
+  RefreshCw,
+  Play,
+  Mail,
+  ChevronDown,
+  ChevronUp,
+  Users,
+  User,
+  MessageSquare,
+  MessageCircle,
+  ArrowDownLeft,
+  Lock,
+} from 'lucide-react'
+import IconButton from '@/components/ui/IconButton'
+import { Tabs } from '@/components/admin/channels/ui'
+import { EmptyState } from '@/components/admin/kit/states'
+import { useActionToast } from '@/components/admin/kit/toast'
+import { InfiniteFooter, fetchJson, useInfiniteList } from '@/components/admin/kit/infinite'
+import { ListFilters, useFilterQuery } from '@/components/admin/kit/list-filters'
+import { Sk } from '@/components/admin/kit/skeleton'
+import { LogRowsSkeleton } from './AuditLoadingParts'
+import { useCanWrite } from '@/contexts/AdminScopesContext'
+import {
+  AUDIT_FIELDS,
+  AUDIT_SEARCH,
+  EMAIL_LOG_ALIASES,
+  EMAIL_LOG_FIELDS,
+  EMAIL_LOG_SEARCH,
+  LOG_COUNT_CAP,
+  MESSAGE_LOG_ALIASES,
+  MESSAGE_LOG_FIELDS,
+  MESSAGE_LOG_SEARCH,
+} from '@/lib/filters/fields/audit'
+
+interface AuditEvent {
+  id: string
+  admin_id: string | null
+  action: string
+  entity_type: string
+  entity_id: string | null
+  summary: string
+  diff: Record<string, { from: unknown; to: unknown; fromLabel?: string; toLabel?: string }> | null
+  metadata: Record<string, any> | null
+  ip_address: string | null
+  created_at: string
+  admin_first_name: string | null
+  admin_last_name: string | null
+  admin_username: string | null
+}
+
+const ENTITY_META: Record<string, { Icon: any; color: string }> = {
+  product: { Icon: Package, color: 'bg-blue-500' },
+  products: { Icon: Package, color: 'bg-blue-500' },
+  product_variants: { Icon: Package, color: 'bg-blue-400' },
+  product_sub_variants: { Icon: Package, color: 'bg-blue-300' },
+  product_images: { Icon: Package, color: 'bg-blue-300' },
+  variant_images: { Icon: Package, color: 'bg-blue-300' },
+  brand: { Icon: Tags, color: 'bg-purple-500' },
+  brands: { Icon: Tags, color: 'bg-purple-500' },
+  category: { Icon: FolderTree, color: 'bg-violet-500' },
+  categories: { Icon: FolderTree, color: 'bg-violet-500' },
+  inventory: { Icon: Boxes, color: 'bg-amber-500' },
+  coupon: { Icon: Ticket, color: 'bg-pink-500' },
+  coupons: { Icon: Ticket, color: 'bg-pink-500' },
+  campaign: { Icon: MailOpen, color: 'bg-emerald-500' },
+  campaigns: { Icon: MailOpen, color: 'bg-emerald-500' },
+  email_campaigns: { Icon: MailOpen, color: 'bg-emerald-500' },
+  mailer_template: { Icon: MailOpen, color: 'bg-emerald-500' },
+  admin: { Icon: ShieldCheck, color: 'bg-red-500' },
+  order: { Icon: ScrollText, color: 'bg-indigo-500' },
+  orders: { Icon: ScrollText, color: 'bg-indigo-500' },
+  order_items: { Icon: ScrollText, color: 'bg-indigo-400' },
+  invoices: { Icon: Receipt, color: 'bg-indigo-400' },
+  quotations: { Icon: ClipboardList, color: 'bg-sky-500' },
+  quotation_items: { Icon: ClipboardList, color: 'bg-sky-400' },
+  cash_sales: { Icon: Receipt, color: 'bg-emerald-600' },
+  cash_sale_items: { Icon: Receipt, color: 'bg-emerald-500' },
+  business_rfqs: { Icon: ClipboardList, color: 'bg-sky-600' },
+  subscriptions: { Icon: TrendingUp, color: 'bg-violet-400' },
+  product_offers: { Icon: Ticket, color: 'bg-pink-400' },
+  users: { Icon: ShieldCheck, color: 'bg-zinc-500' },
+  customer_profiles: { Icon: ShieldCheck, color: 'bg-zinc-400' },
+  business_profiles: { Icon: ShieldCheck, color: 'bg-zinc-400' },
+  business_discounts: { Icon: Ticket, color: 'bg-zinc-400' },
+  suppliers: { Icon: Truck, color: 'bg-amber-500' },
+  purchase_orders: { Icon: ClipboardList, color: 'bg-amber-500' },
+  purchase_order_items: { Icon: ClipboardList, color: 'bg-amber-400' },
+  grns: { Icon: Receipt, color: 'bg-amber-600' },
+  grn_items: { Icon: Receipt, color: 'bg-amber-500' },
+  expenses: { Icon: Wallet, color: 'bg-rose-500' },
+  expense_payments: { Icon: Wallet, color: 'bg-rose-400' },
+  shelf_locations: { Icon: MapPin, color: 'bg-cyan-500' },
+  shelf_stock: { Icon: Boxes, color: 'bg-cyan-400' },
+  shipping_zones: { Icon: MapPin, color: 'bg-teal-500' },
+  site_settings: { Icon: Settings, color: 'bg-zinc-600' },
+  gallery_images: { Icon: ImageIcon, color: 'bg-blue-300' },
+  warehouses: { Icon: Warehouse, color: 'bg-cyan-600' },
+  price_inflation_log: { Icon: TrendingUp, color: 'bg-pink-500' },
+  scenarios: { Icon: Wand2, color: 'bg-fuchsia-500' },
+  custom_scenarios: { Icon: Wand2, color: 'bg-fuchsia-400' },
+  review_forms: { Icon: ClipboardList, color: 'bg-amber-500' },
+  customer_tag_definitions: { Icon: Tag, color: 'bg-cyan-500' },
+}
+
+function relTime(iso: string) {
+  const sec = Math.round((Date.now() - new Date(iso).getTime()) / 1000)
+  if (sec < 60) return 'just now'
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`
+  if (sec < 86400) return `${Math.round(sec / 3600)}h ago`
+  if (sec < 86400 * 30) return `${Math.round(sec / 86400)}d ago`
+  return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+/** What page 1 of a log reports: the default date window it used, and whether the count stopped at the cap. */
+type LogMeta = { window: { from: string; days: number } | null; capped: boolean } | null
+
+const metaOf = (json: any): LogMeta => ({ window: json?.window ?? null, capped: !!json?.capped })
+
+function LogWindowNote({ meta, noun }: { meta: LogMeta; noun: string }) {
+  if (!meta?.window && !meta?.capped) return null
+  return (
+    <p className="text-xs text-foreground-muted mb-3">
+      {meta.window ? `Showing the last ${meta.window.days} days. Pick dates to see older ${noun}.` : ''}
+      {meta.capped
+        ? ` Over ${LOG_COUNT_CAP.toLocaleString('en-IN')} ${noun} match; narrow the filters to count them all.`
+        : ''}
+    </p>
+  )
+}
+
+/** Empty-list text: filters set, or the default window, or nothing logged at all. */
+const emptyText = (filters: string, meta: LogMeta, noun: string, none: string) =>
+  filters
+    ? `No ${noun} match these filters.`
+    : meta?.window
+      ? `No ${noun} in the last ${meta.window.days} days.`
+      : none
+
+/** Page 1's meta goes to `setMeta`; the list rows and total are returned. */
+async function fetchLog(
+  url: string,
+  rowsKey: string,
+  page: number,
+  setMeta: Dispatch<SetStateAction<LogMeta>>,
+  signal: AbortSignal
+) {
+  const data = await fetchJson(url, signal)
+  if (page === 1) setMeta(metaOf(data))
+  return { rows: data?.[rowsKey] || [], total: data?.total || 0 }
+}
+
+interface CronJob {
+  id: string
+  name: string
+  path: string
+  intervalMs: number
+  intervalLabel: string
+  tenantScope: string | null
+  inPlan: boolean
+  enabled: boolean
+  lastRun: string | null
+  lastStatus: string | null
+  lastError: string | null
+  log: Array<{ t: string; ok: boolean; err?: string; detail?: unknown }>
+}
+
+type PageTab = 'audit' | 'mail_log' | 'sms_log' | 'whatsapp_log' | 'cron'
+
+export default function AdminAuditClient() {
+  const toast = useActionToast()
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
+  const pageSize = 50
+  // Logs hold emails and numbers: exporting them needs audit:write.
+  const canExport = useCanWrite('audit')
+  // Each list's filters live in the URL; the tabs share from / to (the date), nothing else.
+  const auditFilters = useFilterQuery(AUDIT_FIELDS)
+  const mailFilters = useFilterQuery(EMAIL_LOG_FIELDS, { aliases: EMAIL_LOG_ALIASES })
+  const messageFilters = useFilterQuery(MESSAGE_LOG_FIELDS, { aliases: MESSAGE_LOG_ALIASES })
+  const [auditMeta, setAuditMeta] = useState<LogMeta>(null)
+  const [mailMeta, setMailMeta] = useState<LogMeta>(null)
+  const [smsMeta, setSmsMeta] = useState<LogMeta>(null)
+  const [waMeta, setWaMeta] = useState<LogMeta>(null)
+
+  const initialTab = (): PageTab => {
+    const t = searchParams?.get('tab')
+    if (t === 'cron') return t
+    if (t === 'mail_log') return t
+    if (t === 'sms_log') return t
+    if (t === 'whatsapp_log') return t
+    return 'audit'
+  }
+  const [pageTab, setPageTabState] = useState<PageTab>(initialTab)
+
+  function setPageTab(next: PageTab) {
+    setPageTabState(next)
+    // Relative to the current route so it stays inside the Settings hub.
+    router.push(`${pathname}?tab=${next}&view=list`, { scroll: false })
+  }
+
+  const [cronJobs, setCronJobs] = useState<CronJob[]>([])
+  const [cronLoading, setCronLoading] = useState(false)
+  const [cronTogglingId, setCronTogglingId] = useState<string | null>(null)
+  const [cronTriggeringId, setCronTriggeringId] = useState<string | null>(null)
+  const [expandedCronId, setExpandedCronId] = useState<string | null>(null)
+
+  // ── Mail Log state (email_logs — every outbound mail with body) ────────────
+  interface MailLogRow {
+    id: string
+    email: string
+    from_email: string | null
+    cc: string | null
+    bcc: string | null
+    subject: string
+    template_name: string | null
+    kind: string | null
+    entity_type: string | null
+    entity_id: string | null
+    status: 'sent' | 'failed'
+    error: string | null
+    sent_at: string
+    message_id: string | null
+    body_size: number
+  }
+  const mailPageSize = 25
+  const [expandedMailId, setExpandedMailId] = useState<string | null>(null)
+  const [mailBodies, setMailBodies] = useState<
+    Record<string, { html: string | null; text: string | null; metadata: any; loading: boolean }>
+  >({})
+
+  const mailList = useInfiniteList<MailLogRow>({
+    key: pageTab === 'mail_log' ? mailFilters : null,
+    pageSize: mailPageSize,
+    getKey: r => r.id,
+    fetchPage: (p, signal) => {
+      const qs = new URLSearchParams(mailFilters)
+      qs.set('page', String(p))
+      qs.set('pageSize', String(mailPageSize))
+      return fetchLog(`/api/admin/audit/mail-log?${qs}`, 'rows', p, setMailMeta, signal)
+    },
+  })
+  const mailRows = mailList.rows
+  const mailLoading = mailList.loading || mailList.loadingMore
+  const loadMailLog = mailList.reload
+
+
+  async function loadMailBody(id: string) {
+    setMailBodies(prev => ({ ...prev, [id]: { html: null, text: null, metadata: null, loading: true } }))
+    try {
+      const res = await fetch(`/api/admin/audit/mail-log/${id}`, { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        setMailBodies(prev => ({
+          ...prev,
+          [id]: {
+            html: data.row?.body_html ?? null,
+            text: data.row?.body_text ?? null,
+            metadata: data.row?.metadata ?? null,
+            loading: false,
+          },
+        }))
+      } else {
+        setMailBodies(prev => ({ ...prev, [id]: { html: null, text: null, metadata: null, loading: false } }))
+      }
+    } catch {
+      setMailBodies(prev => ({ ...prev, [id]: { html: null, text: null, metadata: null, loading: false } }))
+    }
+  }
+
+  function toggleMailExpand(id: string) {
+    if (expandedMailId === id) {
+      setExpandedMailId(null)
+      return
+    }
+    setExpandedMailId(id)
+    if (!mailBodies[id]) loadMailBody(id)
+  }
+
+  // ── SMS / WhatsApp Log state (message_logs — every outbound notification) ───
+  interface MessageLogRow {
+    id: string
+    channel: string
+    to_number: string
+    from_number: string | null
+    body: string | null
+    kind: string | null
+    status: string
+    error: string | null
+    provider_sid: string | null
+    sent_at: string
+  }
+
+  const smsPageSize = 25
+  const [expandedSmsId, setExpandedSmsId] = useState<string | null>(null)
+
+  const smsList = useInfiniteList<MessageLogRow>({
+    key: pageTab === 'sms_log' ? messageFilters : null,
+    pageSize: smsPageSize,
+    getKey: r => r.id,
+    fetchPage: (p, signal) => {
+      const qs = new URLSearchParams(messageFilters)
+      qs.set('channel', 'sms')
+      qs.set('page', String(p))
+      qs.set('pageSize', String(smsPageSize))
+      return fetchLog(`/api/admin/audit/message-log?${qs}`, 'rows', p, setSmsMeta, signal)
+    },
+  })
+  const smsRows = smsList.rows
+  const smsLoading = smsList.loading || smsList.loadingMore
+  const loadSmsLog = smsList.reload
+
+
+  const waPageSize = 25
+  const [expandedWaId, setExpandedWaId] = useState<string | null>(null)
+
+  const waList = useInfiniteList<MessageLogRow>({
+    key: pageTab === 'whatsapp_log' ? messageFilters : null,
+    pageSize: waPageSize,
+    getKey: r => r.id,
+    fetchPage: (p, signal) => {
+      const qs = new URLSearchParams(messageFilters)
+      qs.set('channel', 'whatsapp')
+      qs.set('page', String(p))
+      qs.set('pageSize', String(waPageSize))
+      return fetchLog(`/api/admin/audit/message-log?${qs}`, 'rows', p, setWaMeta, signal)
+    },
+  })
+  const waRows = waList.rows
+  const waLoading = waList.loading || waList.loadingMore
+  const loadWaLog = waList.reload
+
+
+  const auditList = useInfiniteList<AuditEvent>({
+    key: pageTab === 'audit' ? auditFilters : null,
+    pageSize,
+    getKey: e => e.id,
+    fetchPage: (p, signal) => {
+      const qs = new URLSearchParams(auditFilters)
+      qs.set('page', String(p))
+      qs.set('pageSize', String(pageSize))
+      return fetchLog(`/api/admin/audit?${qs}`, 'events', p, setAuditMeta, signal)
+    },
+  })
+  const events = auditList.rows
+  const loading = auditList.loading
+
+
+  async function loadCronJobs() {
+    setCronLoading(true)
+    try {
+      const res = await fetch('/api/admin/cron/status', { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        setCronJobs(data.jobs || [])
+      }
+    } finally {
+      setCronLoading(false)
+    }
+  }
+
+  async function toggleCronJob(jobId: string, enabled: boolean) {
+    setCronTogglingId(jobId)
+    try {
+      const res = await fetch('/api/admin/cron/config', {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId, enabled }),
+      })
+      toast.result({ ok: res.ok }, { success: enabled ? 'Job enabled' : 'Job disabled', error: 'Could not update the job' })
+      setCronJobs(prev => prev.map(j => (j.id === jobId ? { ...j, enabled } : j)))
+    } finally {
+      setCronTogglingId(null)
+    }
+  }
+
+  async function triggerCronJob(jobId: string) {
+    setCronTriggeringId(jobId)
+    try {
+      const res = await fetch('/api/admin/cron/trigger', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId }),
+      })
+      toast.result({ ok: res.ok }, { success: 'Job triggered', error: 'Could not trigger the job' })
+      await loadCronJobs()
+    } finally {
+      setCronTriggeringId(null)
+    }
+  }
+
+  useEffect(() => {
+    if (pageTab === 'cron') loadCronJobs()
+  }, [pageTab])
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null)
+
+  function actorLabel(e: AuditEvent) {
+    const f = e.admin_first_name || ''
+    const l = e.admin_last_name || ''
+    return `${f} ${l}`.trim() || e.admin_username || (e.admin_id ? 'Admin' : 'System')
+  }
+
+  function ActorChip({ e }: { e: AuditEvent }) {
+    const name = actorLabel(e)
+    const isSystem = !e.admin_id
+    return (
+      <span
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${
+          isSystem
+            ? 'bg-surface-secondary text-foreground-muted border-border-default'
+            : 'bg-accent-500/5 text-accent-500 border-accent-500/30'
+        }`}
+      >
+        {isSystem ? <Settings className="w-2.5 h-2.5 shrink-0" /> : <User className="w-2.5 h-2.5 shrink-0" />}
+        {name}
+      </span>
+    )
+  }
+
+  interface ImageGroup {
+    kind: 'image_group'
+    id: string
+    productId: string | null
+    productName: string | null
+    representative: AuditEvent
+    children: AuditEvent[]
+    operation: 'create' | 'replace' | 'delete' | 'reorder'
+    oldImage: { url: string | null; thumb: string | null; name: string | null } | null
+    newImage: { url: string | null; thumb: string | null; name: string | null } | null
+  }
+  interface ProductGroup {
+    kind: 'product_group'
+    id: string
+    productId: string
+    productName: string
+    representative: AuditEvent
+    children: AuditEvent[]
+    variantCount: number
+    subVariantCount: number
+    imageCount: number
+    parentTable?: string
+  }
+  type RowItem = (AuditEvent & { kind: 'event' }) | ImageGroup | ProductGroup
+
+  function productIdOf(e: AuditEvent): string | null {
+    if (e.entity_type === 'products') return e.entity_id
+    if (
+      e.entity_type === 'product_variants' ||
+      e.entity_type === 'product_sub_variants' ||
+      e.entity_type === 'product_images'
+    ) {
+      return (e.metadata?.product_id as string) || null
+    }
+    if (e.entity_type === 'variant_images') {
+      return (e.metadata?.product_id as string) || (e.metadata?.variant_id as string) || null
+    }
+    return null
+  }
+
+  function parentKeyOf(e: AuditEvent): string | null {
+    if (e.metadata?.inflation_id) return `inflation:${e.metadata.inflation_id}`
+    if (e.entity_type === 'price_inflation_log') return `inflation:${e.entity_id}`
+    const pid = productIdOf(e)
+    if (pid) return `product:${pid}`
+    if (e.entity_type === 'purchase_orders') return `po:${e.entity_id}`
+    if (e.entity_type === 'purchase_order_items' && e.metadata?.po_id) return `po:${e.metadata.po_id}`
+    if (e.entity_type === 'grns') return `grn:${e.entity_id}`
+    if (e.entity_type === 'grn_items' && e.metadata?.grn_id) return `grn:${e.metadata.grn_id}`
+    if (e.entity_type === 'expenses') return `expense:${e.entity_id}`
+    if (e.entity_type === 'expense_payments' && e.metadata?.expense_id) return `expense:${e.metadata.expense_id}`
+    if (e.entity_type === 'shelf_locations') return `shelf:${e.entity_id}`
+    if (e.entity_type === 'shelf_stock' && e.metadata?.location_id) return `shelf:${e.metadata.location_id}`
+    return null
+  }
+
+  const rows = useMemo<RowItem[]>(() => {
+    const out: RowItem[] = []
+    let i = 0
+    while (i < events.length) {
+      const e = events[i]
+      const pid = productIdOf(e)
+      const hasInflation = !!e.metadata?.inflation_id || e.entity_type === 'price_inflation_log'
+
+      if (pid && !hasInflation) {
+        const t0 = new Date(e.created_at).getTime()
+        const cluster: AuditEvent[] = [e]
+        let j = i + 1
+        while (j < events.length) {
+          const n = events[j]
+          if (productIdOf(n) !== pid) break
+          if (n.admin_id !== e.admin_id) break
+          if (Math.abs(new Date(n.created_at).getTime() - t0) > 5000) break
+          cluster.push(n)
+          j++
+        }
+
+        const isImageOnly = cluster.every(c => c.entity_type === 'product_images' || c.entity_type === 'variant_images')
+        const hasNonImage = cluster.some(c => c.entity_type !== 'product_images' && c.entity_type !== 'variant_images')
+
+        if (cluster.length > 1 && isImageOnly) {
+          const createChild = cluster.find(c => c.action === 'create')
+          const deleteChild = cluster.find(c => c.action === 'delete')
+          const repr = createChild || deleteChild || cluster[0]
+          let operation: 'create' | 'replace' | 'delete' | 'reorder'
+          if (createChild && deleteChild) operation = 'replace'
+          else if (createChild) operation = 'create'
+          else if (deleteChild) operation = 'delete'
+          else operation = 'reorder'
+          const productName = repr.summary.match(/"([^"]+)"$/)?.[1] || null
+          const newImage = createChild?.metadata
+            ? {
+                url: createChild.metadata.image_url || null,
+                thumb: createChild.metadata.thumbnail_url || null,
+                name: createChild.metadata.file_name || null,
+              }
+            : null
+          const oldImage = deleteChild?.metadata
+            ? {
+                url: deleteChild.metadata.image_url || null,
+                thumb: deleteChild.metadata.thumbnail_url || null,
+                name: deleteChild.metadata.file_name || null,
+              }
+            : null
+          out.push({
+            kind: 'image_group',
+            id: `grp-${e.id}`,
+            productId: pid,
+            productName,
+            representative: repr,
+            children: cluster,
+            operation,
+            oldImage,
+            newImage,
+          })
+          i = j
+          continue
+        }
+
+        if (cluster.length > 1 && hasNonImage) {
+          const productRow = cluster.find(c => c.entity_type === 'products')
+          const repr = productRow || cluster[0]
+          const productName = repr.summary.match(/"([^"]+)"/)?.[1] || pid
+          out.push({
+            kind: 'product_group',
+            id: `pgrp-${e.id}`,
+            productId: pid,
+            productName,
+            representative: repr,
+            children: cluster,
+            variantCount: cluster.filter(c => c.entity_type === 'product_variants').length,
+            subVariantCount: cluster.filter(c => c.entity_type === 'product_sub_variants').length,
+            imageCount: cluster.filter(c => c.entity_type === 'product_images').length,
+          })
+          i = j
+          continue
+        }
+      }
+
+      const pkey = parentKeyOf(e)
+      if (pkey) {
+        const t0 = new Date(e.created_at).getTime()
+        const cluster: AuditEvent[] = [e]
+        const windowMs = pkey.startsWith('inflation:') ? 60_000 : 5000
+        let j = i + 1
+        while (j < events.length) {
+          const n = events[j]
+          if (parentKeyOf(n) !== pkey) break
+          if (n.admin_id !== e.admin_id) break
+          if (Math.abs(new Date(n.created_at).getTime() - t0) > windowMs) break
+          cluster.push(n)
+          j++
+        }
+        if (cluster.length > 1) {
+          const [parentTableHint] = pkey.split(':')
+          const parentEntityMap: Record<string, string> = {
+            po: 'purchase_orders',
+            grn: 'grns',
+            expense: 'expenses',
+            shelf: 'shelf_locations',
+            inflation: 'price_inflation_log',
+          }
+          const parentTable = parentEntityMap[parentTableHint] || ''
+          const parentRow = parentTable ? cluster.find(c => c.entity_type === parentTable) : undefined
+          const repr = parentRow || cluster[0]
+          const parentName = repr.summary.match(/"([^"]+)"/)?.[1] || pkey.split(':')[1]
+          out.push({
+            kind: 'product_group',
+            id: `pkgrp-${e.id}`,
+            productId: pkey.split(':')[1],
+            productName: parentName,
+            representative: repr,
+            children: cluster,
+            variantCount: 0,
+            subVariantCount: 0,
+            imageCount: 0,
+            parentTable,
+          })
+          i = j
+          continue
+        }
+      }
+
+      out.push({ ...e, kind: 'event' })
+      i++
+    }
+    return out
+  }, [events])
+
+  return (
+    <div className="p-4 sm:p-6 w-full">
+      <div className="mb-5">
+        <Tabs
+          tabs={[
+            { id: 'audit' as const, label: 'Audit Events', icon: <ScrollText className="w-3.5 h-3.5" /> },
+            { id: 'mail_log' as const, label: 'Mail Log', icon: <Mail className="w-3.5 h-3.5" /> },
+            { id: 'sms_log' as const, label: 'SMS Log', icon: <MessageSquare className="w-3.5 h-3.5" /> },
+            { id: 'whatsapp_log' as const, label: 'WhatsApp Log', icon: <MessageCircle className="w-3.5 h-3.5" /> },
+            { id: 'cron' as const, label: 'Cron Jobs', icon: <Clock className="w-3.5 h-3.5" /> },
+          ]}
+          value={pageTab}
+          onChange={setPageTab}
+          actions={
+            pageTab === 'mail_log' ? (
+              <IconButton icon={RefreshCw} label="Refresh" busy={mailLoading} onClick={loadMailLog} />
+            ) : pageTab === 'sms_log' ? (
+              <IconButton icon={RefreshCw} label="Refresh" busy={smsLoading} onClick={loadSmsLog} />
+            ) : pageTab === 'whatsapp_log' ? (
+              <IconButton icon={RefreshCw} label="Refresh" busy={waLoading} onClick={loadWaLog} />
+            ) : pageTab === 'cron' ? (
+              <IconButton icon={RefreshCw} label="Refresh" busy={cronLoading} onClick={loadCronJobs} />
+            ) : null
+          }
+        />
+      </div>
+
+      {pageTab === 'mail_log' && (
+        <div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <p className="text-sm text-foreground-muted">
+              Every outbound email — transactional, automation, business, and broadcasts. Click a row to see the full
+              HTML body.
+            </p>
+          </div>
+
+          <div className="mb-4">
+            <ListFilters
+              entity="logs.email"
+              fields={EMAIL_LOG_FIELDS}
+              aliases={EMAIL_LOG_ALIASES}
+              search={EMAIL_LOG_SEARCH}
+              noun="Emails"
+              exportable={canExport}
+            />
+          </div>
+          <LogWindowNote meta={mailMeta} noun="emails" />
+
+          {mailLoading && mailRows.length === 0 ? (
+            <LogRowsSkeleton />
+          ) : mailRows.length === 0 ? (
+            <EmptyState title={emptyText(mailFilters, mailMeta, 'emails', 'No emails found.')} />
+          ) : (
+            <div className="space-y-2">
+              {mailRows.map(row => {
+                const isExpanded = expandedMailId === row.id
+                const body = mailBodies[row.id]
+                return (
+                  <div
+                    key={row.id}
+                    className="bg-surface-elevated border border-border-default rounded-lg overflow-hidden"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => toggleMailExpand(row.id)}
+                      className="w-full text-left p-3 sm:p-4 flex items-center gap-3 sm:gap-4 hover:bg-surface-secondary/40 transition-colors"
+                    >
+                      <div
+                        className={`w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0 ${row.status === 'sent' ? 'bg-emerald-500' : 'bg-red-500'}`}
+                      >
+                        {row.status === 'sent' ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-foreground truncate">
+                            {row.subject || '(no subject)'}
+                          </span>
+                          {row.kind && (
+                            <span className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                              {row.kind}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-foreground-muted mt-0.5 truncate">
+                          To: {row.email}
+                          {row.from_email ? <span className="ml-2">From: {row.from_email}</span> : null}
+                        </p>
+                        <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                          <span className="text-[11px] text-foreground-muted">
+                            {new Date(row.sent_at).toLocaleString('en-IN', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                          {row.entity_type && row.entity_id && (
+                            <span className="text-[11px] text-foreground-muted">
+                              {row.entity_type} · <span className="font-mono">{row.entity_id.slice(0, 8)}</span>
+                            </span>
+                          )}
+                          {row.template_name && (
+                            <span className="text-[10px] font-mono text-foreground-muted">{row.template_name}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        {isExpanded ? (
+                          <ChevronUp className="w-4 h-4 text-foreground-muted" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-foreground-muted" />
+                        )}
+                      </div>
+                    </button>
+
+                    {isExpanded && (
+                      <div className="border-t border-border-default">
+                        {row.error && (
+                          <div className="px-4 py-2 bg-red-500/5 text-[11px] text-red-600 dark:text-red-400 font-mono break-all">
+                            {row.error}
+                          </div>
+                        )}
+                        <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-0 md:gap-4 text-xs">
+                          <dl className="px-4 py-3 space-y-1.5 bg-surface-secondary/40 md:bg-transparent">
+                            <div>
+                              <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">From</dt>
+                              <dd className="text-foreground break-all">{row.from_email || '—'}</dd>
+                            </div>
+                            <div>
+                              <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">To</dt>
+                              <dd className="text-foreground break-all">{row.email}</dd>
+                            </div>
+                            {row.cc && (
+                              <div>
+                                <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">Cc</dt>
+                                <dd className="text-foreground break-all">{row.cc}</dd>
+                              </div>
+                            )}
+                            {row.bcc && (
+                              <div>
+                                <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">Bcc</dt>
+                                <dd className="text-foreground break-all">{row.bcc}</dd>
+                              </div>
+                            )}
+                            <div>
+                              <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">Subject</dt>
+                              <dd className="text-foreground">{row.subject}</dd>
+                            </div>
+                            {row.message_id && (
+                              <div>
+                                <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">
+                                  Message-ID
+                                </dt>
+                                <dd className="text-foreground font-mono text-[10px] break-all">{row.message_id}</dd>
+                              </div>
+                            )}
+                          </dl>
+                          <div className="p-3 sm:p-4">
+                            {row.kind === 'otp' ? (
+                              <p className="text-xs text-foreground-muted italic">
+                                Body redacted — OTP emails are not stored for security.
+                              </p>
+                            ) : body?.loading ? (
+                              <Sk className="h-40 w-full rounded-lg" />
+                            ) : body?.html ? (
+                              <iframe
+                                title={`mail-${row.id}`}
+                                srcDoc={body.html}
+                                sandbox=""
+                                className="w-full h-96 rounded border border-border-default bg-white"
+                              />
+                            ) : body?.text ? (
+                              <pre className="text-xs whitespace-pre-wrap text-foreground bg-surface-secondary/50 p-3 rounded border border-border-default max-h-96 overflow-auto">
+                                {body.text}
+                              </pre>
+                            ) : (
+                              <p className="text-xs text-foreground-muted italic">No body recorded for this email.</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {!mailList.loading && <InfiniteFooter shown={mailRows.length} control={mailList} noun="emails" className="mt-4" />}
+        </div>
+      )}
+
+      {pageTab === 'sms_log' && (
+        <div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <p className="text-sm text-foreground-muted">Every outbound SMS notification (OTP is not logged).</p>
+          </div>
+
+          <div className="mb-4">
+            <ListFilters
+              entity="logs.sms"
+              fields={MESSAGE_LOG_FIELDS}
+              aliases={MESSAGE_LOG_ALIASES}
+              search={MESSAGE_LOG_SEARCH}
+              noun="Messages"
+              exportable={canExport}
+            />
+          </div>
+          <LogWindowNote meta={smsMeta} noun="messages" />
+
+          {smsLoading && smsRows.length === 0 ? (
+            <LogRowsSkeleton />
+          ) : smsRows.length === 0 ? (
+            <EmptyState title={emptyText(messageFilters, smsMeta, 'SMS messages', 'No SMS messages found.')} />
+          ) : (
+            <div className="space-y-2">
+              {smsRows.map(row => {
+                const isExpanded = expandedSmsId === row.id
+                return (
+                  <div
+                    key={row.id}
+                    className="bg-surface-elevated border border-border-default rounded-lg overflow-hidden"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setExpandedSmsId(isExpanded ? null : row.id)}
+                      className="w-full text-left p-3 sm:p-4 flex items-center gap-3 sm:gap-4 hover:bg-surface-secondary/40 transition-colors"
+                    >
+                      <div
+                        className={`w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0 ${row.status === 'received' ? 'bg-blue-500' : row.status === 'sent' ? 'bg-emerald-500' : 'bg-red-500'}`}
+                      >
+                        {row.status === 'received' ? (
+                          <ArrowDownLeft className="w-4 h-4" />
+                        ) : row.status === 'sent' ? (
+                          <CheckCircle2 className="w-4 h-4" />
+                        ) : (
+                          <XCircle className="w-4 h-4" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-foreground truncate">
+                            {row.to_number || '(no number)'}
+                          </span>
+                          {row.kind && (
+                            <span className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                              {row.kind}
+                            </span>
+                          )}
+                        </div>
+                        {row.body && <p className="text-xs text-foreground-muted mt-0.5 truncate">{row.body}</p>}
+                        <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                          <span className="text-[11px] text-foreground-muted">
+                            {new Date(row.sent_at).toLocaleString('en-IN', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                          {row.from_number && (
+                            <span className="text-[11px] text-foreground-muted">From: {row.from_number}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        {isExpanded ? (
+                          <ChevronUp className="w-4 h-4 text-foreground-muted" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-foreground-muted" />
+                        )}
+                      </div>
+                    </button>
+
+                    {isExpanded && (
+                      <div className="border-t border-border-default">
+                        {row.error && (
+                          <div className="px-4 py-2 bg-red-500/5 text-[11px] text-red-600 dark:text-red-400 font-mono break-all">
+                            {row.error}
+                          </div>
+                        )}
+                        <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-0 md:gap-4 text-xs">
+                          <dl className="px-4 py-3 space-y-1.5 bg-surface-secondary/40 md:bg-transparent">
+                            <div>
+                              <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">To</dt>
+                              <dd className="text-foreground break-all">{row.to_number}</dd>
+                            </div>
+                            <div>
+                              <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">From</dt>
+                              <dd className="text-foreground break-all">{row.from_number || '—'}</dd>
+                            </div>
+                            {row.kind && (
+                              <div>
+                                <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">Kind</dt>
+                                <dd className="text-foreground">{row.kind}</dd>
+                              </div>
+                            )}
+                            {row.provider_sid && (
+                              <div>
+                                <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">
+                                  Provider SID
+                                </dt>
+                                <dd className="text-foreground font-mono text-[10px] break-all">{row.provider_sid}</dd>
+                              </div>
+                            )}
+                          </dl>
+                          <div className="p-3 sm:p-4">
+                            {row.body ? (
+                              <pre className="text-xs whitespace-pre-wrap text-foreground bg-surface-secondary/50 p-3 rounded border border-border-default max-h-96 overflow-auto">
+                                {row.body}
+                              </pre>
+                            ) : (
+                              <p className="text-xs text-foreground-muted italic">No body recorded for this message.</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {!smsList.loading && <InfiniteFooter shown={smsRows.length} control={smsList} noun="messages" className="mt-4" />}
+        </div>
+      )}
+
+      {pageTab === 'whatsapp_log' && (
+        <div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <p className="text-sm text-foreground-muted">Every outbound WhatsApp notification (OTP is not logged).</p>
+          </div>
+
+          <div className="mb-4">
+            <ListFilters
+              entity="logs.whatsapp"
+              fields={MESSAGE_LOG_FIELDS}
+              aliases={MESSAGE_LOG_ALIASES}
+              search={MESSAGE_LOG_SEARCH}
+              noun="Messages"
+              exportable={canExport}
+            />
+          </div>
+          <LogWindowNote meta={waMeta} noun="messages" />
+
+          {waLoading && waRows.length === 0 ? (
+            <LogRowsSkeleton />
+          ) : waRows.length === 0 ? (
+            <EmptyState title={emptyText(messageFilters, waMeta, 'WhatsApp messages', 'No WhatsApp messages found.')} />
+          ) : (
+            <div className="space-y-2">
+              {waRows.map(row => {
+                const isExpanded = expandedWaId === row.id
+                return (
+                  <div
+                    key={row.id}
+                    className="bg-surface-elevated border border-border-default rounded-lg overflow-hidden"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setExpandedWaId(isExpanded ? null : row.id)}
+                      className="w-full text-left p-3 sm:p-4 flex items-center gap-3 sm:gap-4 hover:bg-surface-secondary/40 transition-colors"
+                    >
+                      <div
+                        className={`w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0 ${row.status === 'received' ? 'bg-blue-500' : row.status === 'sent' ? 'bg-emerald-500' : 'bg-red-500'}`}
+                      >
+                        {row.status === 'received' ? (
+                          <ArrowDownLeft className="w-4 h-4" />
+                        ) : row.status === 'sent' ? (
+                          <CheckCircle2 className="w-4 h-4" />
+                        ) : (
+                          <XCircle className="w-4 h-4" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-foreground truncate">
+                            {row.to_number || '(no number)'}
+                          </span>
+                          {row.kind && (
+                            <span className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                              {row.kind}
+                            </span>
+                          )}
+                        </div>
+                        {row.body && <p className="text-xs text-foreground-muted mt-0.5 truncate">{row.body}</p>}
+                        <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                          <span className="text-[11px] text-foreground-muted">
+                            {new Date(row.sent_at).toLocaleString('en-IN', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                          {row.from_number && (
+                            <span className="text-[11px] text-foreground-muted">From: {row.from_number}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        {isExpanded ? (
+                          <ChevronUp className="w-4 h-4 text-foreground-muted" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-foreground-muted" />
+                        )}
+                      </div>
+                    </button>
+
+                    {isExpanded && (
+                      <div className="border-t border-border-default">
+                        {row.error && (
+                          <div className="px-4 py-2 bg-red-500/5 text-[11px] text-red-600 dark:text-red-400 font-mono break-all">
+                            {row.error}
+                          </div>
+                        )}
+                        <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-0 md:gap-4 text-xs">
+                          <dl className="px-4 py-3 space-y-1.5 bg-surface-secondary/40 md:bg-transparent">
+                            <div>
+                              <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">To</dt>
+                              <dd className="text-foreground break-all">{row.to_number}</dd>
+                            </div>
+                            <div>
+                              <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">From</dt>
+                              <dd className="text-foreground break-all">{row.from_number || '—'}</dd>
+                            </div>
+                            {row.kind && (
+                              <div>
+                                <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">Kind</dt>
+                                <dd className="text-foreground">{row.kind}</dd>
+                              </div>
+                            )}
+                            {row.provider_sid && (
+                              <div>
+                                <dt className="text-foreground-muted text-[10px] uppercase tracking-wide">
+                                  Provider SID
+                                </dt>
+                                <dd className="text-foreground font-mono text-[10px] break-all">{row.provider_sid}</dd>
+                              </div>
+                            )}
+                          </dl>
+                          <div className="p-3 sm:p-4">
+                            {row.body ? (
+                              <pre className="text-xs whitespace-pre-wrap text-foreground bg-surface-secondary/50 p-3 rounded border border-border-default max-h-96 overflow-auto">
+                                {row.body}
+                              </pre>
+                            ) : (
+                              <p className="text-xs text-foreground-muted italic">No body recorded for this message.</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {!waList.loading && <InfiniteFooter shown={waRows.length} control={waList} noun="messages" className="mt-4" />}
+        </div>
+      )}
+
+      {pageTab === 'cron' && (
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-sm text-foreground-muted">
+              Background jobs running in the server process. Toggle to enable/disable; last run status reflects current
+              deployment.
+            </p>
+          </div>
+          {cronLoading && cronJobs.length === 0 ? (
+            <LogRowsSkeleton icon={false} />
+          ) : (
+            <div className="space-y-3">
+              {cronJobs.map(job => {
+                const isExpanded = expandedCronId === job.id
+                return (
+                  <div
+                    key={job.id}
+                    className={`bg-surface-elevated border border-border-default rounded-lg overflow-hidden ${
+                      job.inPlan ? '' : 'opacity-55'
+                    }`}
+                  >
+                    <div className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-foreground">{job.name}</span>
+                          <span className="text-[10px] font-mono text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                            {job.intervalLabel}
+                          </span>
+                          {!job.inPlan && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                              <Lock className="w-3 h-3" /> not in your plan
+                            </span>
+                          )}
+                          {job.inPlan && job.lastStatus === 'ok' && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-green-700 dark:text-green-400">
+                              <CheckCircle2 className="w-3 h-3" /> last run ok
+                            </span>
+                          )}
+                          {job.inPlan && job.lastStatus === 'error' && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-red-500">
+                              <XCircle className="w-3 h-3" /> last run failed
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-foreground-muted mt-0.5 font-mono break-all">{job.path}</p>
+                        {job.inPlan && job.lastRun && (
+                          <p className="text-[11px] text-foreground-muted mt-0.5">
+                            Last run: {new Date(job.lastRun).toLocaleString('en-IN')}
+                            {job.lastError ? ` — ${job.lastError}` : ''}
+                          </p>
+                        )}
+                        {job.inPlan && !job.lastRun && (
+                          <p className="text-[11px] text-foreground-muted mt-0.5 italic">No runs recorded yet</p>
+                        )}
+                      </div>
+                      {job.inPlan && (
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={cronTriggeringId === job.id}
+                          onClick={() => triggerCronJob(job.id)}
+                          className="flex items-center gap-1.5 px-3 h-control-sm rounded text-xs font-semibold bg-surface-secondary text-foreground-muted hover:bg-accent-500/10 hover:text-accent-500 disabled:opacity-50 transition-colors"
+                        >
+                          {cronTriggeringId === job.id ? (
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Play className="w-3 h-3" />
+                          )}
+                          Trigger now
+                        </button>
+                        {job.log.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setExpandedCronId(isExpanded ? null : job.id)}
+                            className="px-3 h-control-sm rounded text-xs font-semibold bg-surface-secondary text-foreground-muted hover:bg-surface-elevated transition-colors"
+                          >
+                            {isExpanded ? 'Hide' : `Logs (${job.log.length})`}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={cronTogglingId === job.id}
+                          onClick={() => toggleCronJob(job.id, !job.enabled)}
+                          className={`px-4 h-control-sm rounded text-xs font-semibold transition-colors disabled:opacity-50 ${
+                            job.enabled
+                              ? 'bg-green-500/10 text-green-700 dark:text-green-400 hover:bg-red-500/10 hover:text-red-500'
+                              : 'bg-surface-secondary text-foreground-muted hover:bg-green-500/10 hover:text-green-600'
+                          }`}
+                        >
+                          {cronTogglingId === job.id ? '...' : job.enabled ? 'Enabled' : 'Disabled'}
+                        </button>
+                      </div>
+                      )}
+                    </div>
+                    {job.inPlan && isExpanded && job.log.length > 0 && (
+                      <div className="border-t border-border-default divide-y divide-border-default max-h-96 overflow-y-auto">
+                        {job.log.map((entry, i) => (
+                          <div
+                            key={i}
+                            className={`px-4 py-2 flex items-start gap-2 text-[11px] ${entry.ok ? '' : 'bg-red-500/5'}`}
+                          >
+                            {entry.ok ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0 mt-px" />
+                            ) : (
+                              <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-px" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <span className="text-foreground-muted">{new Date(entry.t).toLocaleString('en-IN')}</span>
+                              {!entry.ok && entry.err && (
+                                <span className="ml-2 text-red-500 font-mono break-words">{entry.err}</span>
+                              )}
+                              {entry.detail !== undefined && (
+                                <pre className="mt-1 text-[10px] font-mono bg-surface-secondary rounded p-1.5 overflow-x-auto whitespace-pre-wrap break-all text-foreground-muted leading-relaxed">
+                                  {typeof entry.detail === 'string'
+                                    ? entry.detail
+                                    : JSON.stringify(entry.detail, null, 2)}
+                                </pre>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {pageTab === 'audit' && (
+        <>
+          <div className="mb-4">
+            <ListFilters
+              entity="audit"
+              fields={AUDIT_FIELDS}
+              search={AUDIT_SEARCH}
+              noun="Events"
+              exportable={canExport}
+            />
+          </div>
+          <LogWindowNote meta={auditMeta} noun="events" />
+
+          {loading ? (
+            <LogRowsSkeleton />
+          ) : events.length === 0 ? (
+            <p className="text-sm text-foreground-muted italic">
+              {emptyText(auditFilters, auditMeta, 'audit events', 'No audit events yet.')}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {rows.map(r => {
+                if (r.kind === 'image_group') {
+                  const repr = r.representative
+                  const meta = ENTITY_META.product_images
+                  const Icon = meta.Icon
+                  const summary =
+                    r.operation === 'replace'
+                      ? `Replaced image for "${r.productName || 'product'}"`
+                      : r.operation === 'create'
+                        ? `Uploaded image for "${r.productName || 'product'}"`
+                        : r.operation === 'delete'
+                          ? `Deleted image from "${r.productName || 'product'}"`
+                          : `Reordered images for "${r.productName || 'product'}"`
+                  const sideEffects = r.children.filter(c => c.id !== repr.id).length
+                  const isExpanded = expandedGroupId === r.id
+
+                  const renderThumb = (img: ImageGroup['oldImage'], state: 'old' | 'new' | 'placeholder') => {
+                    const ringColor =
+                      state === 'old'
+                        ? 'border-red-400/60'
+                        : state === 'new'
+                          ? 'border-emerald-400/60'
+                          : 'border-border-default'
+                    if (!img || !img.thumb) {
+                      return (
+                        <div
+                          className={`shrink-0 w-14 h-14 rounded border ${ringColor} bg-surface-secondary flex items-center justify-center`}
+                          title="No image"
+                        >
+                          <ImageIcon className="w-5 h-5 text-foreground-muted opacity-50" />
+                        </div>
+                      )
+                    }
+                    return (
+                      <a
+                        href={img.url || img.thumb}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={`shrink-0 block w-14 h-14 rounded overflow-hidden border ${ringColor} bg-surface-secondary`}
+                        title={img.name || 'View full image'}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={img.thumb} alt={img.name || ''} className="w-full h-full object-cover" />
+                      </a>
+                    )
+                  }
+
+                  return (
+                    <div key={r.id} className="bg-surface-elevated border border-border-default rounded-lg p-3">
+                      <div className="flex gap-3 items-start">
+                        <div
+                          className={`w-8 h-8 rounded-full ${meta.color} flex items-center justify-center text-white shrink-0`}
+                        >
+                          <Icon className="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-x-6 gap-y-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                                product_images.{r.operation}
+                              </span>
+                              <span className="text-[10px] text-foreground-muted">{relTime(repr.created_at)}</span>
+                              {sideEffects > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedGroupId(isExpanded ? null : r.id)}
+                                  className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20 transition-colors flex items-center gap-1"
+                                >
+                                  {isExpanded ? '−' : '+'}
+                                  {sideEffects} cascading update{sideEffects !== 1 ? 's' : ''}
+                                </button>
+                              )}
+                            </div>
+                            <p className="text-sm text-foreground mt-1 break-words">{summary}</p>
+                            <p className="text-[11px] text-foreground-muted mt-0.5 flex items-center gap-1.5 flex-wrap">
+                              <span className="text-foreground-muted">Changed by</span>
+                              <ActorChip e={repr} />
+                              {repr.ip_address ? (
+                                <span className="text-foreground-muted">· {repr.ip_address}</span>
+                              ) : null}
+                            </p>
+                          </div>
+
+                          <div className="bg-surface-secondary/60 rounded p-2 flex items-center gap-3">
+                            {r.operation === 'replace' && (
+                              <>
+                                {renderThumb(r.oldImage, 'old')}
+                                <ArrowRight className="w-4 h-4 text-foreground-muted" />
+                                {renderThumb(r.newImage, 'new')}
+                              </>
+                            )}
+                            {r.operation === 'create' && (
+                              <>
+                                {renderThumb(null, 'placeholder')}
+                                <ArrowRight className="w-4 h-4 text-foreground-muted" />
+                                {renderThumb(r.newImage, 'new')}
+                              </>
+                            )}
+                            {r.operation === 'delete' && (
+                              <>
+                                {renderThumb(r.oldImage, 'old')}
+                                <ArrowRight className="w-4 h-4 text-foreground-muted" />
+                                {renderThumb(null, 'placeholder')}
+                              </>
+                            )}
+                            {r.operation === 'reorder' && (
+                              <>
+                                {renderThumb(r.newImage, 'new')}
+                                <span className="text-[11px] text-foreground-muted">image order changed</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      {isExpanded && (
+                        <div className="mt-3 ml-11 border-l-2 border-border-default pl-3 space-y-2">
+                          {r.children.map(child => {
+                            const childRender = (raw: unknown, label: string | undefined) => {
+                              if (label) return <>&quot;{label}&quot;</>
+                              if (raw === null || raw === undefined)
+                                return <span className="text-foreground-muted italic">none</span>
+                              if (typeof raw === 'boolean') return raw ? 'true' : 'false'
+                              if (typeof raw === 'string' && raw.length > 40)
+                                return JSON.stringify(raw.slice(0, 40) + '…')
+                              return JSON.stringify(raw)
+                            }
+                            return (
+                              <div key={child.id} className="text-[11px]">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono uppercase text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded break-all">
+                                    {child.entity_type}.{child.action}
+                                  </span>
+                                  <span className="text-foreground-muted">{relTime(child.created_at)}</span>
+                                </div>
+                                <div className="mt-0.5 font-mono text-foreground-muted break-all">
+                                  {child.diff &&
+                                    Object.entries(child.diff).map(([k, v]) => {
+                                      const vAny = v as any
+                                      return (
+                                        <span key={k} className="mr-3">
+                                          <span className="text-foreground-muted">{k}:</span>{' '}
+                                          <span className="text-red-500 line-through">
+                                            {childRender(vAny.from, vAny.fromLabel)}
+                                          </span>
+                                          <span> → </span>
+                                          <span className="text-emerald-600">{childRender(vAny.to, vAny.toLabel)}</span>
+                                        </span>
+                                      )
+                                    })}
+                                  {!child.diff && <span className="italic">no field-level diff</span>}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )
+                }
+
+                if (r.kind === 'product_group') {
+                  const repr = r.representative
+                  const meta = ENTITY_META.products
+                  const Icon = meta.Icon
+                  const sideEffects = r.children.length - 1
+                  const isExpanded = expandedGroupId === r.id
+                  const reprDiff = repr.diff
+                  const reprActionTag = `${repr.entity_type}.${repr.action}`
+                  const childRender = (raw: unknown, label: string | undefined) => {
+                    if (label)
+                      return (
+                        <>
+                          &quot;{label}&quot;{' '}
+                          <span className="text-foreground-muted opacity-60">({String(raw).slice(0, 8)}…)</span>
+                        </>
+                      )
+                    if (raw === null || raw === undefined)
+                      return <span className="text-foreground-muted italic">none</span>
+                    if (typeof raw === 'boolean') return raw ? 'true' : 'false'
+                    if (typeof raw === 'string' && raw.length > 60) return JSON.stringify(raw.slice(0, 60) + '…')
+                    return JSON.stringify(raw)
+                  }
+                  const tally: string[] = []
+                  if (r.variantCount) tally.push(`${r.variantCount} variant${r.variantCount !== 1 ? 's' : ''}`)
+                  if (r.subVariantCount)
+                    tally.push(`${r.subVariantCount} sub-variant${r.subVariantCount !== 1 ? 's' : ''}`)
+                  if (r.imageCount) tally.push(`${r.imageCount} image${r.imageCount !== 1 ? 's' : ''}`)
+                  if (r.parentTable) {
+                    const childCounts = r.children.reduce<Record<string, number>>((acc, c) => {
+                      if (c.entity_type !== r.parentTable) acc[c.entity_type] = (acc[c.entity_type] || 0) + 1
+                      return acc
+                    }, {})
+                    Object.entries(childCounts).forEach(([k, v]) => tally.push(`${v} ${k.replace(/_/g, ' ')}`))
+                  }
+                  return (
+                    <div key={r.id} className="bg-surface-elevated border border-border-default rounded-lg p-3">
+                      <div className="flex gap-3 items-start">
+                        <div
+                          className={`w-8 h-8 rounded-full ${meta.color} flex items-center justify-center text-white shrink-0`}
+                        >
+                          <Icon className="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-x-6 gap-y-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                                {reprActionTag}
+                              </span>
+                              <span className="text-[10px] text-foreground-muted">{relTime(repr.created_at)}</span>
+                              {sideEffects > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedGroupId(isExpanded ? null : r.id)}
+                                  className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20 transition-colors flex items-center gap-1"
+                                >
+                                  {isExpanded ? '−' : '+'}
+                                  {sideEffects} cascading update{sideEffects !== 1 ? 's' : ''}
+                                </button>
+                              )}
+                            </div>
+                            <p className="text-sm text-foreground mt-1 break-words">{repr.summary}</p>
+                            {tally.length > 0 && (
+                              <p className="text-[11px] text-foreground-muted mt-0.5">
+                                also touched: {tally.join(' · ')}
+                              </p>
+                            )}
+                            <p className="text-[11px] text-foreground-muted mt-0.5 flex items-center gap-1.5 flex-wrap">
+                              <span className="text-foreground-muted">Changed by</span>
+                              <ActorChip e={repr} />
+                              {repr.ip_address ? (
+                                <span className="text-foreground-muted">· {repr.ip_address}</span>
+                              ) : null}
+                            </p>
+                          </div>
+
+                          {reprDiff && Object.keys(reprDiff).length > 0 ? (
+                            <div className="bg-surface-secondary/60 rounded p-2 space-y-1 max-h-40 overflow-y-auto">
+                              {Object.entries(reprDiff).map(([k, v]) => {
+                                const vAny = v as any
+                                return (
+                                  <div key={k} className="text-[11px] font-mono leading-snug break-all">
+                                    <span className="text-foreground-muted">{k}:</span>{' '}
+                                    <span className="text-red-500 line-through">
+                                      {childRender(vAny.from, vAny.fromLabel)}
+                                    </span>
+                                    <span className="text-foreground-muted"> → </span>
+                                    <span className="text-emerald-600">{childRender(vAny.to, vAny.toLabel)}</span>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-foreground-muted italic self-center">
+                              {repr.action === 'create'
+                                ? 'New product created'
+                                : repr.action === 'delete'
+                                  ? 'Product deleted'
+                                  : 'No direct fields changed on parent'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {isExpanded && (
+                        <div className="mt-3 ml-11 border-l-2 border-border-default pl-3 space-y-2">
+                          {r.children
+                            .filter(c => c.id !== repr.id)
+                            .map(child => (
+                              <div key={child.id} className="text-[11px]">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono uppercase text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded break-all">
+                                    {child.entity_type}.{child.action}
+                                  </span>
+                                  <span className="text-foreground-muted">{relTime(child.created_at)}</span>
+                                </div>
+                                <p className="text-sm text-foreground mt-0.5">{child.summary}</p>
+                                {child.diff && (
+                                  <div className="mt-0.5 font-mono text-foreground-muted break-all">
+                                    {Object.entries(child.diff).map(([k, v]) => {
+                                      const vAny = v as any
+                                      return (
+                                        <span key={k} className="mr-3">
+                                          <span className="text-foreground-muted">{k}:</span>{' '}
+                                          <span className="text-red-500 line-through">
+                                            {childRender(vAny.from, vAny.fromLabel)}
+                                          </span>
+                                          <span> → </span>
+                                          <span className="text-emerald-600">{childRender(vAny.to, vAny.toLabel)}</span>
+                                        </span>
+                                      )
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                }
+
+                const e = r
+                const meta = ENTITY_META[e.entity_type] || { Icon: ScrollText, color: 'bg-zinc-500' }
+                const Icon = meta.Icon
+                const hasDiff = e.diff && Object.keys(e.diff).length > 0
+                const renderSide = (raw: unknown, label: string | undefined) => {
+                  if (label)
+                    return (
+                      <>
+                        &quot;{label}&quot;{' '}
+                        <span className="text-foreground-muted opacity-60">({String(raw).slice(0, 8)}…)</span>
+                      </>
+                    )
+                  if (raw === null || raw === undefined)
+                    return <span className="text-foreground-muted italic">none</span>
+                  if (typeof raw === 'boolean') return raw ? 'true' : 'false'
+                  if (typeof raw === 'string' && raw.length > 60) return JSON.stringify(raw.slice(0, 60) + '…')
+                  return JSON.stringify(raw)
+                }
+                return (
+                  <div key={e.id} className="bg-surface-elevated border border-border-default rounded-lg p-3">
+                    <div className="flex gap-3 items-start">
+                      <div
+                        className={`w-8 h-8 rounded-full ${meta.color} flex items-center justify-center text-white shrink-0`}
+                      >
+                        <Icon className="w-4 h-4" />
+                      </div>
+                      <div className="flex-1 min-w-0 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-x-6 gap-y-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted bg-surface-secondary px-1.5 py-0.5 rounded">
+                              {e.entity_type}.{e.action}
+                            </span>
+                            <span className="text-[10px] text-foreground-muted">{relTime(e.created_at)}</span>
+                          </div>
+                          <p className="text-sm text-foreground mt-1 break-words">{e.summary}</p>
+                          <p className="text-[11px] text-foreground-muted mt-0.5 flex items-center gap-1.5 flex-wrap">
+                            <span className="text-foreground-muted">Changed by</span>
+                            <ActorChip e={e} />
+                            {e.ip_address ? <span className="text-foreground-muted">· {e.ip_address}</span> : null}
+                          </p>
+                        </div>
+
+                        {hasDiff ? (
+                          <div className="bg-surface-secondary/60 rounded p-2 space-y-1 max-h-40 overflow-y-auto">
+                            {(e.entity_type === 'product_images' || e.entity_type === 'variant_images') &&
+                              e.metadata?.thumbnail_url && (
+                                <a
+                                  href={e.metadata.image_url || e.metadata.thumbnail_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="float-right ml-2 mb-1 block w-12 h-12 rounded overflow-hidden border border-border-default bg-surface"
+                                  title={e.metadata.file_name || 'View full image'}
+                                >
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={e.metadata.thumbnail_url}
+                                    alt={e.metadata.file_name || ''}
+                                    className="w-full h-full object-cover"
+                                  />
+                                </a>
+                              )}
+                            {Object.entries(e.diff!).map(([k, v]) => {
+                              const vAny = v as any
+                              return (
+                                <div key={k} className="text-[11px] font-mono leading-snug break-all">
+                                  <span className="text-foreground-muted">{k}:</span>{' '}
+                                  <span className="text-red-500 line-through">
+                                    {renderSide(vAny.from, vAny.fromLabel)}
+                                  </span>
+                                  <span className="text-foreground-muted"> → </span>
+                                  <span className="text-emerald-600">{renderSide(vAny.to, vAny.toLabel)}</span>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : (e.entity_type === 'product_images' || e.entity_type === 'variant_images') &&
+                          e.metadata?.thumbnail_url ? (
+                          <div className="bg-surface-secondary/60 rounded p-2 flex items-center gap-3 self-center w-full">
+                            <a
+                              href={e.metadata.image_url || e.metadata.thumbnail_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="shrink-0 block w-14 h-14 rounded overflow-hidden border border-border-default bg-surface"
+                              title={e.metadata.file_name || 'View full image'}
+                            >
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={e.metadata.thumbnail_url}
+                                alt={e.metadata.file_name || ''}
+                                className="w-full h-full object-cover"
+                              />
+                            </a>
+                            <span className="text-[11px] text-foreground-muted italic">
+                              {e.action === 'create'
+                                ? 'New image uploaded'
+                                : e.action === 'delete'
+                                  ? 'Image removed'
+                                  : 'Image updated'}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-foreground-muted italic self-center">
+                            {e.action === 'create'
+                              ? 'New record created'
+                              : e.action === 'delete'
+                                ? 'Record deleted'
+                                : 'No field-level diff'}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {!loading && <InfiniteFooter shown={events.length} control={auditList} noun="events" className="mt-4" />}
+        </>
+      )}
+    </div>
+  )
+}

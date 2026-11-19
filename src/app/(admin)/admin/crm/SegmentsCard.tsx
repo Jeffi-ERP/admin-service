@@ -1,0 +1,231 @@
+'use client'
+
+import { useState } from 'react'
+import { useHasScope } from '@/contexts/AdminScopesContext'
+import { Dialog, Pager, usePagedList, LoadingLines } from '@/components/admin/kit'
+import Link from 'next/link'
+import CrmMailerPanel from './CrmMailerPanel'
+import { ap } from '@/lib/shared/admin-path'
+
+interface SegmentMeta {
+  key: string
+  label: string
+  count: number
+  color: string
+}
+
+interface Customer {
+  id: string
+  email: string
+  first_name: string | null
+  last_name: string | null
+  lifetime_value: number
+  order_count: number
+  last_order_at: string | null
+  health_score: number | null
+}
+
+function fmtName(c: Customer) {
+  return [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email
+}
+
+function fmtDate(iso: string) {
+  return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+function CustomerRow({ c, large }: { c: Customer; large?: boolean }) {
+  return (
+    <Link
+      href={ap(`/admin/customers/${c.id}/view`)}
+      className={`flex items-center justify-between gap-3 ${large ? 'py-2.5' : 'py-2'} hover:bg-surface-secondary/50 -mx-2 px-2 rounded-lg transition-colors`}
+    >
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-foreground truncate">{fmtName(c)}</p>
+        <p className="text-[11px] text-foreground-muted break-words">
+          {c.email}
+          {c.lifetime_value > 0 && ` · ₹${Math.round(c.lifetime_value).toLocaleString('en-IN')} LTV`}
+          {c.order_count > 0 && ` · ${c.order_count} order${c.order_count !== 1 ? 's' : ''}`}
+          {c.last_order_at && ` · Last ${fmtDate(c.last_order_at)}`}
+        </p>
+      </div>
+      {c.health_score != null && (
+        <span
+          className={`text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 ${
+            c.health_score >= 60
+              ? 'bg-green-500/10 text-green-700 dark:text-green-400'
+              : c.health_score >= 40
+                ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                : 'bg-red-500/10 text-red-700 dark:text-red-400'
+          }`}
+        >
+          {c.health_score}
+        </span>
+      )}
+    </Link>
+  )
+}
+
+interface ModalProps {
+  segment: SegmentMeta
+  onClose: () => void
+}
+
+function SegmentModal({ segment, onClose }: ModalProps) {
+  const canMail = useHasScope('mailer:write')
+  const list = usePagedList<Customer>({
+    key: segment.key,
+    fetchPage: async (page, signal) => {
+      const r = await fetch(`/api/admin/customers?segment=${segment.key}&limit=10&page=${page}`, { credentials: 'include', signal })
+      if (!r.ok) throw new Error('Failed to load customers')
+      const d = await r.json()
+      return { rows: d.customers || [], total: d.total }
+    },
+  })
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={segment.label}
+      description={`${segment.count.toLocaleString('en-IN')} customers in segment`}
+      size="full"
+      zIndex="z-[300]"
+    >
+        <div className="flex flex-1 min-h-0 flex-col overflow-y-auto divide-y divide-border-default md:flex-row md:overflow-hidden md:divide-y-0 md:divide-x">
+          {/* Left: customer list */}
+          <div className={`flex flex-col bg-surface-secondary/30 ${canMail ? 'shrink-0 md:w-2/5' : 'flex-1'}`}>
+            <div className="px-6 pt-4 pb-2 shrink-0 border-b border-border-default">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-foreground">Customers</h3>
+            </div>
+            <div className="overflow-y-auto flex-1 px-6 py-4 divide-y divide-border-default">
+              {list.loading ? (
+                <div className="py-2">
+                  <LoadingLines lines={8} />
+                </div>
+              ) : list.error ? (
+                <p className="text-sm text-red-600 dark:text-red-400 py-4">{list.error}</p>
+              ) : list.rows.length === 0 ? (
+                <p className="text-sm text-foreground-muted py-4">No customers found.</p>
+              ) : (
+                list.rows.map(c => <CustomerRow key={c.id} c={c} large />)
+              )}
+            </div>
+            <div className="px-6 pb-3 shrink-0">
+              <Pager control={list.pager} noun="customers" />
+            </div>
+          </div>
+
+          {/* Right: mailer panel */}
+          {canMail && (
+            <div className="flex flex-col flex-1 min-w-0">
+              <div className="flex items-center justify-between px-6 pt-4 pb-2 shrink-0">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-foreground">Send message</h3>
+                <Link
+                  href={ap(`/admin/customers?segment=${segment.key}`)}
+                  className="text-xs text-accent-500 hover:text-accent-600 font-medium"
+                  onClick={onClose}
+                >
+                  View all in Customers →
+                </Link>
+              </div>
+              <div className="overflow-y-auto flex-1 px-6 pb-6">
+                <CrmMailerPanel
+                  segmentKey={segment.key}
+                  segmentLabel={segment.label}
+                  recipientCount={segment.count}
+                  onClose={onClose}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+    </Dialog>
+  )
+}
+
+export default function SegmentsCard({ segments }: { segments: Record<string, number> }) {
+  const [activeSegment, setActiveSegment] = useState<SegmentMeta | null>(null)
+
+  const SEGMENT_META: { key: string; label: string; color: string }[] = [
+    {
+      key: 'vip',
+      label: 'VIP',
+      color: 'bg-amber-500/10 text-amber-700 border-amber-500/40 dark:text-amber-400',
+    },
+    {
+      key: 'loyal',
+      label: 'Loyal',
+      color: 'bg-emerald-500/10 text-emerald-700 border-emerald-500/40 dark:text-emerald-400',
+    },
+    {
+      key: 'b2b',
+      label: 'B2B',
+      color: 'bg-indigo-500/10 text-indigo-700 border-indigo-500/40 dark:text-indigo-400',
+    },
+    {
+      key: 'repeat',
+      label: 'Repeat',
+      color: 'bg-blue-500/10 text-blue-700 border-blue-500/40 dark:text-blue-400',
+    },
+    {
+      key: 'new',
+      label: 'New (<30d)',
+      color: 'bg-purple-500/10 text-purple-700 border-purple-500/40 dark:text-purple-400',
+    },
+    {
+      key: 'at_risk',
+      label: 'At Risk',
+      color: 'bg-orange-500/10 text-orange-700 border-orange-500/40 dark:text-orange-400',
+    },
+    {
+      key: 'dormant',
+      label: 'Dormant',
+      color: 'bg-red-500/10 text-red-700 border-red-500/40 dark:text-red-400',
+    },
+    {
+      key: 'one_time',
+      label: 'One-Time',
+      color: 'bg-surface-secondary text-foreground border-border-default',
+    },
+    {
+      key: 'lead',
+      label: 'Lead',
+      color: 'bg-pink-500/10 text-pink-700 border-pink-500/40 dark:text-pink-400',
+    },
+  ]
+
+  return (
+    <>
+      <div className="bg-surface-elevated rounded-xl border border-border-default p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-foreground mb-4">Segments</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {SEGMENT_META.map(({ key, label, color }) => {
+            const count = segments[key] ?? 0
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() =>
+                  setActiveSegment({
+                    key,
+                    label,
+                    count,
+                    color,
+                  })
+                }
+                className={`group rounded-xl border px-4 py-3 text-left transition-all hover:shadow-md hover:-translate-y-0.5 last:col-span-2 sm:last:col-span-1 ${color}`}
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2 sm:flex-nowrap">
+                  <span className="text-xs font-semibold uppercase tracking-wide opacity-80">{label}</span>
+                  <span className="text-2xl font-bold tabular-nums">{count.toLocaleString('en-IN')}</span>
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {activeSegment && <SegmentModal segment={activeSegment} onClose={() => setActiveSegment(null)} />}
+    </>
+  )
+}

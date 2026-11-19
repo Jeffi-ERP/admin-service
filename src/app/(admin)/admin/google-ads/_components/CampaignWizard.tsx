@@ -1,0 +1,464 @@
+'use client'
+
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useActionToast } from '@/components/admin/kit/toast'
+import { AlertTriangle, ChevronLeft, ChevronRight, Loader2, Megaphone } from 'lucide-react'
+import IconButton from '@/components/ui/IconButton'
+import { useCanUseAi, useCanWrite } from '@/contexts/AdminScopesContext'
+import { useDraftLock } from '@/hooks/useDraftLock'
+import { useAutosaveDraft } from '@/hooks/useAutosaveDraft'
+import AutosaveStatusPill from '@/components/admin/AutosaveStatusPill'
+import { DraftLockBanner, LockedFieldset } from '@/components/admin/kit/draft-lock'
+import { Sk } from '@/components/admin/kit/skeleton'
+import { assertDraftResponse, lockHeaders } from '@/lib/client/draft-lock-client'
+import type { WizardBootstrap } from '@/lib/google-ads/manage-data'
+import { FEED_TYPES, IMAGE_AD_TYPES, specProblems } from '@/lib/google-ads/campaign-spec'
+import { postJson, errorText } from './ManageContext'
+import { newDraft, toSpec, type Draft } from './wizard/draft'
+import { Modal, btnGhost, btnPrimary } from './wizard/fields'
+import { StepCampaign, StepTargeting } from './wizard/StepBasics'
+import { AssetGroupEditor, MerchantLink, ProductGroups, SearchAds, type LinkState } from './wizard/StepAds'
+import { ImageAdEditor, type CampaignOptions } from './wizard/StepImageAd'
+import ExtensionsEditor, { SuggestionsLoading, emptyExtDraft, fetchExtDraft, type ExtDraft } from './wizard/ExtensionsEditor'
+
+// New campaign wizard: Search, Standard Shopping, Performance Max, Demand Gen or Display. "Check with Google" sends the
+// whole campaign with validateOnly; "Create" validates again and creates it (paused by default). Past the first step
+// (or on Save as Draft) the wizard autosaves to a draft that the Drafts tab lists and ?draft= reopens.
+
+const STEPS = ['Campaign', 'Targeting', 'Ads', 'Assets', 'Review'] as const
+const DRAFTS = '/api/admin/google-ads/campaign-drafts'
+
+interface Problem {
+  message: string
+  where?: string
+}
+
+/** `resume`: a draft to reopen (from the Drafts tab); `onResumeClosed` clears it. */
+export function NewCampaignButton({
+  onCreated,
+  resume,
+  onResumeClosed,
+}: {
+  onCreated: () => void
+  resume?: string | null
+  onResumeClosed?: () => void
+}) {
+  const canManage = useCanWrite('google_ads_campaigns')
+  const [open, setOpen] = useState(false)
+  if (!canManage) return null
+  return (
+    <>
+      <IconButton icon={Megaphone} label="New campaign" variant="accent" onClick={() => setOpen(true)} />
+      {(open || resume) && (
+        <CampaignWizard
+          key={resume ?? 'new'}
+          draftId={resume ?? null}
+          onClose={() => {
+            setOpen(false)
+            if (resume) onResumeClosed?.()
+          }}
+          onCreated={onCreated}
+        />
+      )}
+    </>
+  )
+}
+
+export default function CampaignWizard({
+  draftId: initialDraftId,
+  onClose,
+  onCreated,
+}: {
+  draftId?: string | null
+  onClose: () => void
+  onCreated: () => void
+}) {
+  const canAi = useCanUseAi('google_ads_campaigns')
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [b, setB] = useState<WizardBootstrap | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [d, setD] = useState<Draft | null>(null)
+  const [step, setStep] = useState(0)
+  const [ext, setExt] = useState<ExtDraft | null>(null)
+  const [extError, setExtError] = useState<string | null>(null)
+  const [link, setLink] = useState<LinkState | null>(null)
+  const [options, setOptions] = useState<CampaignOptions | null>(null)
+  const [busy, setBusy] = useState<'preview' | 'create' | null>(null)
+  const [result, setResultState] = useState<{ ok: boolean; text: string; problems?: Problem[]; done?: boolean } | null>(null)
+  const toast = useActionToast()
+  const setResult = (r: { ok: boolean; text: string; problems?: Problem[]; done?: boolean } | null) => {
+    setResultState(r)
+    if (r) toast.result(r)
+  }
+
+  const [draftId, setDraftId] = useState<string | null>(initialDraftId ?? null)
+  const draftIdRef = useRef(draftId)
+  draftIdRef.current = draftId
+  const skipSaveRef = useRef(true)
+  const doneRef = useRef(false)
+  const creatingRef = useRef<Promise<string | null> | null>(null)
+  const draftBody = () => ({ title: d?.name.trim() || null, fields: { draft: d, ext, step } })
+
+  const lock = useDraftLock({ resourceType: 'google_ads_campaign', resourceId: draftId })
+  const autosave = useAutosaveDraft<ReturnType<typeof draftBody>>({
+    save: async (body, signal) => {
+      const id = draftIdRef.current
+      if (!id) return
+      const res = await fetch(`${DRAFTS}/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...lockHeaders('google_ads_campaign', id) },
+        credentials: 'include',
+        signal,
+        body: JSON.stringify(body),
+      })
+      await assertDraftResponse(res, 'Could not save the campaign draft')
+    },
+    enabled: () => !!draftIdRef.current && !doneRef.current && !lock.readOnly,
+    onLocked: (_err, unsaved) => lock.markLocked(unsaved),
+  })
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const r = await fetch('/api/admin/google-ads/manage', { credentials: 'include' })
+        const data = await r.json().catch(() => ({}))
+        if (!r.ok) throw new Error(data.error || 'Could not load store data')
+        let saved: { draft?: Partial<Draft>; ext?: ExtDraft | null; step?: number } | null = null
+        if (initialDraftId) {
+          const dr = await fetch(`${DRAFTS}/${initialDraftId}`, { credentials: 'include' })
+          const j = await dr.json().catch(() => ({}))
+          if (!dr.ok) throw new Error(j.error || 'Could not open the campaign draft')
+          saved = j.draft?.fields ?? {}
+        }
+        skipSaveRef.current = true
+        setB(data)
+        // New fields added to the wizard since the draft was saved keep their defaults.
+        setD({ ...newDraft(data), ...(saved?.draft ?? {}) })
+        if (saved?.ext) setExt(saved.ext)
+        if (typeof saved?.step === 'number') setStep(Math.min(STEPS.length - 1, Math.max(0, saved.step)))
+      } catch (e) {
+        setLoadError((e as Error).message)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function ensureDraft(): Promise<string | null> {
+    if (draftIdRef.current) return draftIdRef.current
+    creatingRef.current ??= (async () => {
+      const res = await fetch(DRAFTS, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(draftBody()),
+      })
+      const j = await res.json().catch(() => ({}))
+      if (!res.ok || !j.id) {
+        toast.error(j.error || 'Could not save the campaign draft')
+        return null
+      }
+      skipSaveRef.current = true
+      setDraftId(j.id)
+      return j.id as string
+    })().finally(() => {
+      creatingRef.current = null
+    })
+    return creatingRef.current
+  }
+
+  const triggerRef = useRef(autosave.trigger)
+  triggerRef.current = autosave.trigger
+  useEffect(() => {
+    if (!d || doneRef.current) return
+    if (skipSaveRef.current) {
+      skipSaveRef.current = false
+      return
+    }
+    // Past the first step the wizard is worth keeping.
+    if (!draftIdRef.current) {
+      if (step > 0) void ensureDraft()
+      return
+    }
+    triggerRef.current(draftBody())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d, ext, step])
+
+  async function saveAsDraft() {
+    try {
+      if (draftIdRef.current) await autosave.flush(draftBody())
+      else if (!(await ensureDraft())) return
+    } catch {
+      return toast.error('Could not save the campaign draft')
+    }
+    doneRef.current = true
+    toast.success('Draft saved: it is on the Drafts tab')
+    onClose()
+  }
+
+  async function discardDraft() {
+    const id = draftIdRef.current
+    if (!id) return
+    // Second click confirms; nothing has been created in Google Ads yet.
+    if (!confirmDiscard) {
+      setConfirmDiscard(true)
+      setTimeout(() => setConfirmDiscard(false), 4000)
+      return
+    }
+    const res = await fetch(`${DRAFTS}/${id}`, { method: 'DELETE', credentials: 'include' })
+    const j = await res.json().catch(() => ({}))
+    if (!res.ok) return toast.error(j.error || 'Could not discard the draft')
+    doneRef.current = true
+    toast.success('Campaign draft discarded')
+    onClose()
+  }
+
+  // Asset suggestions load once, when the Assets step is first opened.
+  useEffect(() => {
+    if (step !== 3 || ext) return
+    fetchExtDraft()
+      .then(setExt)
+      .catch(e => {
+        setExtError(e.message)
+        setExt(emptyExtDraft())
+      })
+  }, [step, ext])
+
+  // Demand Gen's daily minimum and the account's audiences, read from Google once.
+  const wantsOptions = d?.type === 'DEMAND_GEN'
+  useEffect(() => {
+    if (!wantsOptions || options) return
+    fetch('/api/admin/google-ads/manage/campaign-options', { credentials: 'include' })
+      .then(async r => {
+        const data = await r.json().catch(() => ({}))
+        setOptions(
+          r.ok
+            ? data
+            : { currency: 'INR', demandGenMinimum: 0, demandGenMinimumFromGoogle: false, audiences: [], audiencesError: data.error || 'Could not read the account' }
+        )
+      })
+      .catch(() => undefined)
+  }, [wantsOptions, options])
+
+  const set = (p: Partial<Draft>) => {
+    setResult(null)
+    setD(cur => (cur ? { ...cur, ...p } : cur))
+  }
+  const spec = useMemo(() => (d ? toSpec(d, ext) : null), [d, ext])
+  const problems = useMemo(() => {
+    if (!spec) return []
+    const list = specProblems(spec, undefined, { demandGenMinimum: options?.demandGenMinimum || null })
+    if (spec.type === 'DEMAND_GEN' && !b?.store.logoUrl) list.push('Demand Gen ads need a logo: add a store logo in Site Controls')
+    if (spec.assetGroup && !spec.assetGroup.feedOnly && !b?.store.logoUrl) list.push('Add a store logo in Site Controls, or use the product feed only')
+    return list
+  }, [spec, b, options])
+  const needsLink = !!d && FEED_TYPES.includes(d.type)
+  const linkBlocked = !!needsLink && !link?.linked
+
+  async function send(preview: boolean) {
+    if (!spec) return
+    setBusy(preview ? 'preview' : 'create')
+    setResult(null)
+    if (!preview) doneRef.current = true
+    const { ok, data } = await postJson('/api/admin/google-ads/manage/campaigns', { spec, preview, draft_id: draftIdRef.current })
+    setBusy(null)
+    if (!ok) doneRef.current = false
+    if (!ok) return setResult({ ok: false, text: errorText(data, 'Google Ads rejected the campaign'), problems: data.problems })
+    if (preview) {
+      const total = Object.values(data.operations ?? {}).reduce((s: number, v: any) => s + Number(v), 0)
+      setResult({
+        ok: true,
+        text: `Google accepted the campaign (${total} changes checked, nothing created yet).${data.followUps?.length ? ` Applied right after creating: ${data.followUps.join(', ')}.` : ''}`,
+      })
+    } else {
+      setResult({ ok: true, done: true, text: `Created campaign ${data.campaignId}${spec.status === 'PAUSED' ? ' (paused)' : ''}. It shows in the Campaigns tab.` })
+      onCreated()
+    }
+  }
+
+  const stepLabel = (i: number) =>
+    i === 2 && d
+      ? d.type === 'SEARCH'
+        ? 'Ads & keywords'
+        : d.type === 'SHOPPING'
+          ? 'Products'
+          : IMAGE_AD_TYPES.includes(d.type)
+            ? 'Ad'
+            : 'Products & assets'
+      : STEPS[i]
+
+  const readOnly = !!draftId && lock.readOnly
+  const footer = (
+    <>
+      {draftId && autosave.status !== 'idle' && <AutosaveStatusPill status={autosave.status} />}
+      {draftId && !result?.done && (lock.canDiscard || !readOnly) && (
+        <button type="button" className={confirmDiscard ? `${btnGhost} !border-red-500/40 !text-red-600` : btnGhost} onClick={discardDraft}>
+          {confirmDiscard ? 'Discard this draft?' : 'Discard draft'}
+        </button>
+      )}
+      {d && !result?.done && !readOnly && (
+        <button type="button" className={btnGhost} onClick={saveAsDraft}>
+          Save as Draft
+        </button>
+      )}
+      {step > 0 && (
+        <button type="button" className={btnGhost} onClick={() => setStep(s => s - 1)}>
+          <ChevronLeft className="w-4 h-4" /> Back
+        </button>
+      )}
+      {step < STEPS.length - 1 && (
+        <button type="button" className={btnPrimary} disabled={!d} onClick={() => setStep(s => s + 1)}>
+          Next <ChevronRight className="w-4 h-4" />
+        </button>
+      )}
+      {step === STEPS.length - 1 && !result?.done && (
+        <>
+          <button type="button" className={btnGhost} disabled={readOnly || !!busy || problems.length > 0 || linkBlocked} onClick={() => send(true)}>
+            {busy === 'preview' && <Loader2 className="w-4 h-4 animate-spin" />} Check with Google
+          </button>
+          <button type="button" className={btnPrimary} disabled={readOnly || !!busy || problems.length > 0 || linkBlocked} onClick={() => send(false)}>
+            {busy === 'create' && <Loader2 className="w-4 h-4 animate-spin" />} Create campaign
+          </button>
+        </>
+      )}
+      {result?.done && (
+        <button type="button" className={btnPrimary} onClick={onClose}>
+          Done
+        </button>
+      )}
+    </>
+  )
+
+  return (
+    <Modal title={draftId ? `New Google Ads campaign${d?.name.trim() ? ` · ${d.name.trim()}` : ''} (draft)` : 'New Google Ads campaign'} onClose={onClose} footer={footer} wide>
+      {loadError && <p className="text-sm text-red-500">{loadError}</p>}
+      {draftId && <DraftLockBanner lock={lock} scope="google_ads_campaigns:write" />}
+      {!loadError && (!b || !d) && (
+        <div className="space-y-4" role="status" aria-busy="true" aria-label="Loading your store data">
+          <ol className="flex flex-wrap gap-1 text-xs">
+            {STEPS.map((s, i) => (
+              <li key={s} className={`rounded-full px-3 py-1 ${i === step ? 'bg-accent-500 text-white' : 'bg-surface-secondary text-foreground-muted'}`}>
+                {i + 1}. {s}
+              </li>
+            ))}
+          </ol>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {STEPS.slice(0, 3).map(s => (
+              <Sk key={s} className="h-20 rounded-lg" />
+            ))}
+          </div>
+          {['Campaign name', 'Daily budget (₹)', 'Bid strategy'].map(l => (
+            <div key={l} className="space-y-1">
+              <p className="text-xs font-medium text-foreground-secondary">{l}</p>
+              <Sk className="h-control rounded-lg" />
+            </div>
+          ))}
+        </div>
+      )}
+      {b && d && (
+        <LockedFieldset readOnly={readOnly}>
+          <div className="space-y-4">
+          <ol className="flex flex-wrap gap-1 text-xs">
+            {STEPS.map((_, i) => (
+              <li key={i}>
+                <button
+                  type="button"
+                  onClick={() => setStep(i)}
+                  className={`rounded-full px-3 py-1 ${i === step ? 'bg-accent-500 text-white' : 'bg-surface-secondary text-foreground-muted hover:text-foreground'}`}
+                >
+                  {i + 1}. {stepLabel(i)}
+                </button>
+              </li>
+            ))}
+          </ol>
+
+          {step === 0 && <StepCampaign d={d} set={set} b={b} demandGenMinimum={options?.demandGenMinimum} />}
+          {step === 1 && <StepTargeting d={d} set={set} b={b} />}
+          {step === 2 && d.type === 'SEARCH' && <SearchAds d={d} set={set} b={b} canAi={canAi} />}
+          {step === 2 && IMAGE_AD_TYPES.includes(d.type) && <ImageAdEditor d={d} set={set} b={b} canAi={canAi} options={options} />}
+          {step === 2 && FEED_TYPES.includes(d.type) && (
+            <div className="space-y-4">
+              <MerchantLink onState={setLink} />
+              <ProductGroups d={d} set={set} b={b} />
+              {d.type === 'PERFORMANCE_MAX' && <AssetGroupEditor d={d} set={set} b={b} canAi={canAi} />}
+            </div>
+          )}
+          {step === 3 && IMAGE_AD_TYPES.includes(d.type) && (
+            <p className="text-sm text-foreground-muted">
+              Sitelinks, callouts, promotions and price lists are used by Search, Shopping and Performance Max; this campaign type does not take them.
+            </p>
+          )}
+          {step === 3 &&
+            !IMAGE_AD_TYPES.includes(d.type) &&
+            (ext ? (
+              <>
+                {extError && <p className="text-xs text-red-500">{extError}</p>}
+                <p className="text-xs text-foreground-muted">Suggested from your store. Untick anything you do not want; edit the text freely.</p>
+                <ExtensionsEditor draft={ext} onChange={setExt} canAi={canAi} facts={b.facts} />
+              </>
+            ) : (
+              <SuggestionsLoading error={extError} />
+            ))}
+          {step === 4 && spec && (
+            <div className="space-y-3 text-sm">
+              <ul className="space-y-1">
+                <li>
+                  <b>{spec.name || 'Unnamed campaign'}</b> · {spec.type.replace('_', ' ').toLowerCase()} · ₹{spec.dailyBudget}/day ·{' '}
+                  {spec.bidding.strategy.replace(/_/g, ' ').toLowerCase()}
+                  {spec.bidding.targetCpa ? ` (target CPA ₹${spec.bidding.targetCpa})` : ''}
+                  {spec.bidding.targetRoas ? ` (target ROAS ${Math.round(spec.bidding.targetRoas * 100)}%)` : ''}
+                </li>
+                <li>Locations: {spec.locations.map(l => l.name).join(', ') || 'none'}</li>
+                {spec.type === 'SEARCH' && (
+                  <li>
+                    {spec.adGroups?.length} ad group(s), {spec.adGroups?.reduce((s, g) => s + g.keywords.length, 0)} keywords
+                  </li>
+                )}
+                {spec.listing && <li>Products: {spec.listing.dimension === 'ALL' ? 'all' : `${spec.listing.values.length} ${spec.listing.dimension.toLowerCase()} group(s)`}</li>}
+                {spec.imageAd && (
+                  <li>
+                    Ad: {spec.imageAd.headlines.length} headlines, {spec.imageAd.descriptions.length} descriptions, {spec.imageAd.imageIds.length} product images
+                    {spec.imageAd.audiences.length ? `, ${spec.imageAd.audiences.length} audience(s)` : ''}
+                  </li>
+                )}
+                {spec.extensions && (
+                  <li>
+                    Assets: {spec.extensions.sitelinks.length} sitelinks, {spec.extensions.callouts.length} callouts, {spec.extensions.promotions.length} promotions,{' '}
+                    {spec.extensions.prices.length} price lists, {spec.extensions.snippets.length} snippets
+                  </li>
+                )}
+                <li>Created {spec.status === 'PAUSED' ? 'paused: enable it from the Campaigns tab when ready' : 'enabled: it starts serving once Google approves the ads'}.</li>
+              </ul>
+              {linkBlocked && (
+                <p className="text-amber-700 dark:text-amber-400 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" /> Link Merchant Center on the Products step first.
+                </p>
+              )}
+              {problems.length > 0 && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+                  <p className="font-medium text-red-600 dark:text-red-400 mb-1">Fix these first:</p>
+                  <ul className="list-disc pl-5 space-y-0.5">
+                    {problems.map(p => (
+                      <li key={p}>{p}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {result && !result.ok && (result.problems?.length ?? 0) > 1 && (
+            <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-3 text-sm" role="status">
+              <p className="font-medium text-red-600 dark:text-red-400 mb-1">Google also reported:</p>
+              <ul className="list-disc pl-5 space-y-0.5 text-xs break-words">
+                {result.problems!.slice(1, 10).map((p, i) => (
+                  <li key={i}>{p.where ? `${p.where}: ${p.message}` : p.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          </div>
+        </LockedFieldset>
+      )}
+    </Modal>
+  )
+}

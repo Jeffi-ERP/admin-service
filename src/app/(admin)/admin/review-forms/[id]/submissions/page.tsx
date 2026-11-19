@@ -1,0 +1,220 @@
+'use client'
+
+import { use, useState, useEffect } from 'react'
+import Image from 'next/image'
+import { Star } from 'lucide-react'
+import { ap } from '@/lib/shared/admin-path'
+import { RequireWrite } from '@/contexts/AdminScopesContext'
+import { PageBody, PageHeader } from '@/components/admin/kit'
+import { Sk } from '@/components/admin/kit/skeleton'
+import { SubmissionCardsLoading } from './SubmissionsLoading'
+
+interface CustomField {
+  id: string
+  label: string
+  type: 'text' | 'textarea' | 'image' | 'rating'
+  required: boolean
+}
+
+interface Submission {
+  id: string
+  email: string
+  screenshot_url: string
+  coupon_code: string | null
+  status: 'pending' | 'approved' | 'rejected'
+  submitted_at: string
+  extra_fields: Record<string, string>
+}
+
+interface FormMeta {
+  title: string
+  custom_fields: CustomField[]
+}
+
+function StarDisplay({ value }: { value: number }) {
+  return (
+    <div className="flex gap-0.5">
+      {[1, 2, 3, 4, 5].map(s => (
+        <Star
+          key={s}
+          className={`w-3.5 h-3.5 ${s <= value ? 'text-amber-400 fill-amber-400' : 'text-border-default'}`}
+        />
+      ))}
+    </div>
+  )
+}
+
+export default function SubmissionsPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params)
+  const [submissions, setSubmissions] = useState<Submission[]>([])
+  const [formMeta, setFormMeta] = useState<FormMeta | null>(null)
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [statusFilter, setStatusFilter] = useState('')
+  const [updating, setUpdating] = useState<string | null>(null)
+
+  const fetchData = async () => {
+    setLoading(true)
+    try {
+      const qs = statusFilter ? `?status=${statusFilter}` : ''
+      const [subsRes, formRes] = await Promise.all([
+        fetch(`/api/admin/review-forms/${id}/submissions${qs}`),
+        fetch(`/api/admin/review-forms/${id}`),
+      ])
+      if (subsRes.ok) {
+        const data = await subsRes.json()
+        setSubmissions(data.submissions)
+        setTotal(data.total)
+      }
+      if (formRes.ok) {
+        const data = await formRes.json()
+        setFormMeta({ title: data.form.title, custom_fields: data.form.custom_fields || [] })
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchData()
+  }, [statusFilter])
+
+  const updateStatus = async (submissionId: string, status: string) => {
+    setUpdating(submissionId)
+    const res = await fetch(`/api/admin/review-forms/${id}/submissions`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submissionId, status }),
+    })
+    if (res.ok) {
+      setSubmissions(prev =>
+        prev.map(s => (s.id === submissionId ? { ...s, status: status as Submission['status'] } : s))
+      )
+    }
+    setUpdating(null)
+  }
+
+  const statusColor = (s: string) =>
+    s === 'approved'
+      ? 'bg-green-500/10 text-green-700'
+      : s === 'rejected'
+        ? 'bg-red-500/10 text-red-600'
+        : 'bg-amber-500/10 text-amber-700'
+
+  return (
+    <PageBody>
+      <PageHeader
+        back={{ href: ap('/admin/review-forms'), label: 'Review Forms' }}
+        title={formMeta?.title ? `${formMeta.title} — Submissions` : 'Submissions'}
+        description={loading && !formMeta ? <Sk className="mt-1 h-3.5 w-16" /> : `${total} total`}
+      />
+
+      <div className="flex h-control w-fit max-w-full gap-1 overflow-x-auto rounded-lg border border-border-default bg-surface-elevated p-0.5">
+        {['', 'pending', 'approved', 'rejected'].map(s => (
+          <button
+            key={s}
+            onClick={() => setStatusFilter(s)}
+            className={`h-full rounded-md px-3 text-xs font-medium transition-colors ${statusFilter === s ? 'bg-accent-500 text-white' : 'text-foreground-muted hover:text-foreground'}`}
+          >
+            {s === '' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <SubmissionCardsLoading />
+      ) : submissions.length === 0 ? (
+        <div className="bg-surface-elevated rounded-xl border border-border-default p-8 text-center text-foreground-muted">
+          No submissions yet
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {submissions.map(s => (
+            <div key={s.id} className="bg-surface-elevated rounded-xl border border-border-default overflow-hidden">
+              <a
+                href={s.screenshot_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block relative aspect-video bg-surface-secondary overflow-hidden"
+              >
+                <Image src={s.screenshot_url} alt="Review screenshot" fill className="object-cover" unoptimized />
+              </a>
+              <div className="p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium text-sm truncate">{s.email}</span>
+                  <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(s.status)}`}>
+                    {s.status}
+                  </span>
+                </div>
+
+                {s.coupon_code && (
+                  <p className="text-xs text-foreground-secondary">
+                    Coupon: <span className="font-mono font-bold text-accent-500">{s.coupon_code}</span>
+                  </p>
+                )}
+
+                {formMeta?.custom_fields &&
+                  formMeta.custom_fields.length > 0 &&
+                  s.extra_fields &&
+                  Object.keys(s.extra_fields).length > 0 && (
+                    <div className="space-y-1.5 pt-1 border-t border-border-default">
+                      {formMeta.custom_fields.map(field => {
+                        const val = s.extra_fields[field.id]
+                        if (!val) return null
+                        return (
+                          <div key={field.id}>
+                            <p className="text-xs text-foreground-muted">{field.label}</p>
+                            {field.type === 'rating' ? (
+                              <StarDisplay value={parseInt(val, 10)} />
+                            ) : field.type === 'image' ? (
+                              <a href={val} target="_blank" rel="noopener noreferrer">
+                                <Image
+                                  src={val}
+                                  alt={field.label}
+                                  width={200}
+                                  height={100}
+                                  className="rounded-lg max-h-24 object-contain"
+                                  unoptimized
+                                />
+                              </a>
+                            ) : (
+                              <p className="text-xs text-foreground break-words">{val}</p>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                <p className="text-xs text-foreground-muted">
+                  {new Date(s.submitted_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+                </p>
+
+                {s.status === 'pending' && (
+                  <RequireWrite scope="review_forms:write">
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        onClick={() => updateStatus(s.id, 'approved')}
+                        disabled={updating === s.id}
+                        className="flex-1 h-control-sm text-xs bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => updateStatus(s.id, 'rejected')}
+                        disabled={updating === s.id}
+                        className="flex-1 h-control-sm text-xs bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </RequireWrite>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </PageBody>
+  )
+}

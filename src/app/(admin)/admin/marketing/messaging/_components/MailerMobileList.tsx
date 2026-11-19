@@ -1,0 +1,234 @@
+'use client'
+
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { Eye, Send, Trash2 } from 'lucide-react'
+import { ap } from '@/lib/shared/admin-path'
+import { useConfirm } from '@/contexts/ConfirmContext'
+import { useToast } from '@/contexts/ToastContext'
+import { useCanWrite } from '@/contexts/AdminScopesContext'
+import MobileListCard from '@/components/admin/mobile/MobileListCard'
+import MobileDetailSheet from '@/components/admin/mobile/MobileDetailSheet'
+import MobileActionSheet, { type MobileAction } from '@/components/admin/mobile/MobileActionSheet'
+import { DraftLockBadge } from '@/components/admin/kit'
+import type { MailerLocks } from './MessagingTable'
+
+interface Campaign {
+  id: string
+  title: string
+  template_key: string
+  channels?: Record<string, { slug: string }> | null
+  subject: string
+  audience_type: string
+  recipient_count: number | null
+  status: string
+  scheduled_at: string | null
+  sent_at: string | null
+  created_at: string
+}
+
+interface Props {
+  campaigns: Campaign[]
+  templateLabels: Record<string, string>
+  statusStyles: Record<string, string>
+  currentListUrl: string
+  host?: string
+  locks?: MailerLocks
+  meId?: string | null
+}
+
+const channelLabel = (
+  c: { template_key: string; channels?: Record<string, { slug?: string; title?: string }> | null },
+  labels: Record<string, string>
+) =>
+  c.template_key === 'library'
+    ? Object.entries(c.channels ?? {})
+        .map(([k, v]) =>
+          k === 'push' ? `App push: ${v.title || '—'}` : `${k === 'sms' ? 'SMS' : k === 'whatsapp' ? 'WhatsApp' : 'Email'}: ${v.slug || 'written here'}`
+        )
+        .join(' · ') || 'No channels'
+    : labels[c.template_key] || c.template_key
+
+function formatDate(c: Campaign): string {
+  if (c.status === 'scheduled' && c.scheduled_at) {
+    return `Scheduled ${new Date(c.scheduled_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' })}`
+  }
+  if (c.sent_at) {
+    return new Date(c.sent_at).toLocaleString('en-IN', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'Asia/Kolkata',
+    })
+  }
+  return new Date(c.created_at).toLocaleDateString('en-IN')
+}
+
+export default function MailerMobileList({ campaigns, templateLabels, statusStyles, currentListUrl, host, locks = {}, meId = null }: Props) {
+  const router = useRouter()
+  const confirm = useConfirm()
+  const { showToast } = useToast()
+  const canWrite = useCanWrite('campaigns:write')
+
+  const [selected, setSelected] = useState<Campaign | null>(null)
+  const [actionsOpen, setActionsOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const viewUrl = (c: Campaign) =>
+    ap(
+      c.status === 'draft'
+        ? `/admin/marketing/messaging/new?draftId=${c.id}`
+        : `/admin/marketing/messaging/${c.id}/view?back=${encodeURIComponent(currentListUrl)}`,
+      host
+    )
+
+  async function dispatch(c: Campaign) {
+    if (busy) return
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/admin/mailer/${c.id}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dispatchNow: true }),
+      })
+      if (!res.ok) return showToast((await res.json().catch(() => ({}))).error || 'Could not send this message', 'error')
+      setSelected(null)
+      router.refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(c: Campaign) {
+    const ok = await confirm({
+      title: 'Delete Campaign',
+      message: `Delete campaign "${c.title}"? This action cannot be undone.`,
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      variant: 'danger',
+    })
+    if (!ok || busy) return
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/admin/mailer/${c.id}`, { method: 'DELETE' })
+      if (!res.ok) return showToast((await res.json().catch(() => ({}))).error || 'Could not delete this message', 'error')
+      setSelected(null)
+      router.refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function buildActions(c: Campaign): MobileAction[] {
+    const actions: MobileAction[] = [
+      {
+        key: 'view',
+        label: c.status === 'draft' ? 'Resume draft' : 'View campaign',
+        icon: <Eye className="w-4 h-4" />,
+        onSelect: () => router.push(viewUrl(c)),
+      },
+    ]
+    if (canWrite && (c.status === 'draft' || c.status === 'scheduled')) {
+      actions.push({
+        key: 'dispatch',
+        label: 'Dispatch now',
+        icon: <Send className="w-4 h-4" />,
+        disabled: busy,
+        onSelect: () => dispatch(c),
+      })
+    }
+    if (canWrite && c.status !== 'sending') {
+      actions.push({
+        key: 'delete',
+        label: 'Delete campaign',
+        icon: <Trash2 className="w-4 h-4" />,
+        danger: true,
+        disabled: busy,
+        onSelect: () => remove(c),
+      })
+    }
+    return actions
+  }
+
+  const statusBadge = (status: string) => (
+    <span
+      className={`inline-block rounded px-1.5 py-0.5 text-[11px] font-medium shrink-0 capitalize ${statusStyles[status] || 'bg-surface-secondary text-foreground-muted'}`}
+    >
+      {status}
+    </span>
+  )
+
+  return (
+    <div className="space-y-3">
+      {campaigns.map(c => (
+        <MobileListCard key={c.id} ariaLabel={`Open ${c.title}`} onTap={() => setSelected(c)}>
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="font-medium text-foreground truncate">{c.title}</p>
+              <p className="text-xs text-foreground-muted truncate">{c.subject}</p>
+            </div>
+            {statusBadge(c.status)}
+          </div>
+          <p className="text-xs text-foreground-muted mt-2 break-words">
+            {channelLabel(c, templateLabels)} · {c.audience_type.replace('_', ' ')}
+          </p>
+          {c.recipient_count != null && (
+            <p className="text-xs text-foreground-muted mt-0.5">{c.recipient_count} recipients</p>
+          )}
+          {locks[c.id] && (
+            <div className="mt-1.5">
+              <DraftLockBadge lock={locks[c.id]} mine={!!meId && locks[c.id].ownerId === meId} />
+            </div>
+          )}
+        </MobileListCard>
+      ))}
+
+      <MobileDetailSheet
+        open={!!selected}
+        onClose={() => setSelected(null)}
+        title={selected?.title}
+        subtitle={selected?.subject}
+        footer={
+          <button
+            type="button"
+            onClick={() => setActionsOpen(true)}
+            className="control-md w-full bg-accent-500 font-semibold text-white hover:bg-accent-600"
+          >
+            Actions
+          </button>
+        }
+      >
+        {selected && (
+          <dl className="px-5 py-4 space-y-3 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-foreground-muted">Status</dt>
+              <dd>{statusBadge(selected.status)}</dd>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-foreground-muted">Template</dt>
+              <dd className="min-w-0 text-foreground text-right break-words">{channelLabel(selected, templateLabels)}</dd>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-foreground-muted">Audience</dt>
+              <dd className="text-foreground text-right capitalize">{selected.audience_type.replace('_', ' ')}</dd>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-foreground-muted">Recipients</dt>
+              <dd className="text-foreground text-right">{selected.recipient_count ?? '—'}</dd>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-foreground-muted">Date</dt>
+              <dd className="text-foreground text-right">{formatDate(selected)}</dd>
+            </div>
+          </dl>
+        )}
+      </MobileDetailSheet>
+
+      <MobileActionSheet
+        open={actionsOpen && !!selected}
+        onClose={() => setActionsOpen(false)}
+        title={selected?.title}
+        actions={selected ? buildActions(selected) : []}
+      />
+    </div>
+  )
+}

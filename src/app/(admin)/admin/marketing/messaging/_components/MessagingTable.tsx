@@ -1,0 +1,207 @@
+'use client'
+
+import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
+import DispatchCampaignButton from '@/components/admin/DispatchCampaignButton'
+import MailerRowActions from '@/components/admin/MailerRowActions'
+import { ap } from '@/lib/shared/admin-path'
+import { DataTable, DraftLockBadge, StatusBadge, type DataCol, type StatusMap, type LoadPage } from '@/components/admin/kit'
+import type { DraftLockView } from '@/lib/client/draft-lock-client'
+import MailerMobileList from './MailerMobileList'
+
+export interface Campaign {
+  id: string
+  title: string
+  template_key: string
+  channels?: Record<string, { slug: string }> | null
+  subject: string
+  audience_type: string
+  recipient_count: number | null
+  status: string
+  scheduled_at: string | null
+  sent_at: string | null
+  created_at: string
+  error?: string | null
+  /** Draft lock, on rows a later page brought in (the first page's come in `locks`). */
+  lock?: MailerLocks[string]
+}
+
+/** Open draft locks by campaign id, for the owner badge. */
+export type MailerLocks = Record<string, Pick<DraftLockView, 'ownerId' | 'ownerName' | 'lastActiveAt'>>
+
+export const MESSAGE_STATUS: StatusMap = {
+  draft: { label: 'Draft', tone: 'muted' },
+  scheduled: { label: 'Scheduled', tone: 'blue' },
+  sending: { label: 'Sending', tone: 'amber' },
+  sent: { label: 'Sent', tone: 'green' },
+  failed: { label: 'Failed', tone: 'red' },
+}
+
+export const channelLabel = (
+  c: { template_key: string; channels?: Record<string, { slug?: string; title?: string }> | null },
+  labels: Record<string, string>
+) =>
+  c.template_key === 'library'
+    ? Object.entries(c.channels ?? {})
+        .map(([k, v]) =>
+          k === 'push' ? `App push: ${v.title || '—'}` : `${k === 'sms' ? 'SMS' : k === 'whatsapp' ? 'WhatsApp' : 'Email'}: ${v.slug || 'written here'}`
+        )
+        .join(' · ') || 'No channels'
+    : labels[c.template_key] || c.template_key
+
+const ist = (d: string) =>
+  new Date(d).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' })
+
+export default function MessagingTable({
+  campaigns,
+  total,
+  page,
+  pageSize,
+  loadPage,
+  search,
+  host,
+  currentListUrl,
+  templateLabels,
+  statusStyles,
+  locks = {},
+  meId = null,
+}: {
+  campaigns: Campaign[]
+  total: number
+  page: number
+  pageSize: number
+  loadPage?: LoadPage<Campaign>
+  search: string
+  host: string
+  currentListUrl: string
+  templateLabels: Record<string, string>
+  statusStyles: Record<string, string>
+  locks?: MailerLocks
+  meId?: string | null
+}) {
+  const lockOf = (c: Campaign) => locks[c.id] ?? c.lock
+  const viewHref = (c: Campaign) =>
+    ap(`/admin/marketing/messaging/${c.id}/view?back=${encodeURIComponent(currentListUrl)}`, host)
+  // Clone every param so advancing page keeps tab/filters; otherwise the parent Suspense re-keys.
+  const sp = useSearchParams()
+  const pageHref = (p: number) => {
+    const qs = new URLSearchParams(sp.toString())
+    if (p > 1) qs.set('page', String(p))
+    else qs.delete('page')
+    const s = qs.toString()
+    return ap(`/admin/marketing/messaging${s ? `?${s}` : ''}`, host)
+  }
+
+  const cols: DataCol<Campaign>[] = [
+    {
+      key: 'title',
+      label: 'Title',
+      sortParam: 'title',
+      render: c => (
+        <div className="min-w-0">
+          <Link
+            href={c.status === 'draft' ? ap(`/admin/marketing/messaging/new?draftId=${c.id}`, host) : viewHref(c)}
+            className="font-medium text-foreground transition-colors hover:text-accent-500"
+          >
+            {c.title}
+          </Link>
+          <p className="max-w-[200px] truncate text-xs text-foreground-muted">{c.subject}</p>
+        </div>
+      ),
+    },
+    {
+      key: 'template',
+      label: 'Template',
+      sortParam: 'template',
+      render: c => <span className="text-foreground-secondary">{channelLabel(c, templateLabels)}</span>,
+    },
+    {
+      key: 'audience',
+      label: 'Audience',
+      sortParam: 'audience',
+      hideBelow: 'lg',
+      render: c => <span className="capitalize text-foreground-secondary">{c.audience_type.replace('_', ' ')}</span>,
+    },
+    {
+      key: 'recipients',
+      label: 'Recipients',
+      num: true,
+      sortParam: 'recipients',
+      render: c => <span className="text-foreground-secondary">{c.recipient_count ?? '—'}</span>,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      sortParam: 'status',
+      render: c => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusBadge status={c.status} map={MESSAGE_STATUS} title={c.error ?? undefined} />
+          <DraftLockBadge lock={lockOf(c)} mine={!!meId && lockOf(c)?.ownerId === meId} />
+        </div>
+      ),
+    },
+    {
+      key: 'date',
+      label: 'Date',
+      sortParam: 'date',
+      sortType: 'date',
+      hideBelow: 'lg',
+      render: c => (
+        <span className="whitespace-nowrap text-xs text-foreground-secondary">
+          {c.status === 'scheduled' && c.scheduled_at
+            ? `Scheduled ${ist(c.scheduled_at)}`
+            : c.sent_at
+              ? ist(c.sent_at)
+              : new Date(c.created_at).toLocaleDateString('en-IN')}
+        </span>
+      ),
+    },
+    {
+      key: 'actions',
+      label: <span className="sr-only">Actions</span>,
+      render: c => (
+        <div className="flex items-center justify-end gap-3" onClick={e => e.stopPropagation()}>
+          {(c.status === 'draft' || c.status === 'scheduled') && (
+            <DispatchCampaignButton id={c.id} scheduledAt={c.scheduled_at} />
+          )}
+          <MailerRowActions id={c.id} title={c.title} viewHref={viewHref(c)} canDelete={c.status !== 'sending'} />
+        </div>
+      ),
+    },
+  ]
+
+  return (
+    <DataTable<Campaign>
+      mode="server"
+      loadPage={loadPage}
+      rows={campaigns}
+      cols={cols}
+      rowKey={c => c.id}
+      total={total}
+      page={page}
+      pageSize={pageSize}
+      pageHref={pageHref}
+      mobile={rows => (
+        <MailerMobileList
+          campaigns={rows}
+          templateLabels={templateLabels}
+          statusStyles={statusStyles}
+          currentListUrl={currentListUrl}
+          host={host}
+          locks={{ ...locks, ...Object.fromEntries(rows.flatMap(r => (r.lock ? [[r.id, r.lock]] : []))) }}
+          meId={meId}
+        />
+      )}
+      empty={{
+        title: 'No campaigns yet.',
+        actionNode: (
+          <span className="hidden md:contents">
+            <Link href={ap('/admin/marketing/messaging/new', host)} className="text-sm text-accent-500 hover:underline">
+              Create your first one.
+            </Link>
+          </span>
+        ),
+      }}
+    />
+  )
+}

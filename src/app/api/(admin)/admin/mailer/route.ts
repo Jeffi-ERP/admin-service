@@ -1,0 +1,73 @@
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { randomUUID } from 'crypto'
+import { authenticateAdmin } from '@/lib/auth/jwt'
+import { hasScope } from '@/lib/auth/scopes'
+import { queryMany, queryCount } from '@/lib/shared/db'
+import { actorOf, withDraftCreate } from '@/lib/admin/draft-locks'
+import { bareEmailDoc } from '@/lib/templates/email-layouts'
+
+export async function GET(request: NextRequest) {
+  const admin = await authenticateAdmin(request)
+  if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!hasScope(admin.role, admin.scopes, 'mailer:read'))
+    return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 })
+
+  const { searchParams } = new URL(request.url)
+  const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10))
+  const pageSize = 20
+  const offset = (page - 1) * pageSize
+
+  const [campaigns, total] = await Promise.all([
+    queryMany(
+      `SELECT id, title, template_key, subject, channels, audience_type, recipient_count, status, scheduled_at, sent_at, created_at
+       FROM email_campaigns ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+      [pageSize, offset]
+    ),
+    queryCount('SELECT COUNT(*) FROM email_campaigns', []),
+  ])
+
+  return NextResponse.json({ campaigns, total, page, pageSize })
+}
+
+export async function POST(request: NextRequest) {
+  const admin = await authenticateAdmin(request)
+  if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!hasScope(admin.role, admin.scopes, 'mailer:write'))
+    return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 })
+
+  const body = await request.json()
+  const { title, subject, audience_type, audience_filter, channels } = body
+  let { template_key, template_data } = body
+  // Store layout off: 'custom' sends a full document as written.
+  if (body.layout === 'raw' && template_key && template_key !== 'library') {
+    template_key = 'custom'
+    template_data = { htmlBody: bareEmailDoc(String(template_data?.body ?? ''), template_data?.preheader) }
+  }
+
+  if (!title || !template_key || !subject || !audience_type) {
+    return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+  }
+
+  // A new campaign is a draft: its creator takes the draft lock in the same transaction.
+  const id = randomUUID()
+  const result = await withDraftCreate(actorOf(admin), 'mailer', id, db =>
+    db.query(
+      `INSERT INTO email_campaigns (id, title, template_key, subject, template_data, audience_type, audience_filter, created_by, channels)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+      [
+        id,
+        title,
+        template_key,
+        subject,
+        JSON.stringify(template_data || {}),
+        audience_type,
+        JSON.stringify(audience_filter || {}),
+        admin.adminId,
+        JSON.stringify(channels || {}),
+      ]
+    )
+  )
+
+  return NextResponse.json({ id: result.rows[0].id }, { status: 201 })
+}
